@@ -1,2 +1,12 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Unreal Engine binary files
+*.uasset binary
+*.umap binary
+*.upk binary
+*.udk binary
+
+# UE4/UE5 generated files
+*.generated.h linguist-generated
+*.generated.cpp linguist-generated
