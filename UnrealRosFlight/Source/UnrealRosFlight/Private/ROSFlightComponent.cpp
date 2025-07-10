@@ -115,17 +115,30 @@ void UROSFlightComponent::BeginPlay()
 
     // Create Publishers
     SimStatePub = Node->CreatePublisher(SimStateTopic, UROS2Publisher::StaticClass(), UROS2SimStateMsg::StaticClass(), UROS2QoS::Default);
-    ImuPub = Node->CreatePublisher(ImuTopic, UROS2Publisher::StaticClass(), UROS2ImuMsg::StaticClass(), UROS2QoS::SensorData);
     CommandPub = Node->CreatePublisher(CommandTopic, UROS2Publisher::StaticClass(), UROS2CommandMsg::StaticClass(), UROS2QoS::Default);
     
-    // Optional sensors
-    MagPub = Node->CreatePublisher(MagTopic, UROS2Publisher::StaticClass(), UROS2MagneticFieldMsg::StaticClass(), UROS2QoS::Default);
-    BaroPub = Node->CreatePublisher(BaroTopic, UROS2Publisher::StaticClass(), UROS2BarometerMsg::StaticClass(), UROS2QoS::Default);
-    BatteryPub = Node->CreatePublisher(BatteryTopic, UROS2Publisher::StaticClass(), UROS2BatteryStatusMsg::StaticClass(), UROS2QoS::Default);
+    // Create sensor publishers only if we're publishing sensor data directly
+    // When using rosflight_sim, the standalone_sensors node handles sensor publishing
+    if (bPublishSensorData)
+    {
+        UE_LOG(LogROSFlight, Warning, TEXT("Publishing sensor data directly from Unreal"));
+        ImuPub = Node->CreatePublisher(ImuTopic, UROS2Publisher::StaticClass(), UROS2ImuMsg::StaticClass(), UROS2QoS::Default);
+        
+        // Optional sensors
+        MagPub = Node->CreatePublisher(MagTopic, UROS2Publisher::StaticClass(), UROS2MagneticFieldMsg::StaticClass(), UROS2QoS::Default);
+        BaroPub = Node->CreatePublisher(BaroTopic, UROS2Publisher::StaticClass(), UROS2BarometerMsg::StaticClass(), UROS2QoS::Default);
+        BatteryPub = Node->CreatePublisher(BatteryTopic, UROS2Publisher::StaticClass(), UROS2BatteryStatusMsg::StaticClass(), UROS2QoS::Default);
+    }
+    else
+    {
+        UE_LOG(LogROSFlight, Warning, TEXT("NOT publishing sensor data - using rosflight_sim's standalone_sensors"));
+    }
 
     // Create Subscribers and Services
+    // Subscribe to forces and moments from the multirotor_forces_and_moments node
+    ROS2_CREATE_SUBSCRIBER(Node, this, TEXT("/forces_and_moments"), UROS2WrenchStampedMsg::StaticClass(), &UROSFlightComponent::HandleWrenchMsg);
+    // Optionally subscribe to the deprecated wrench topic for backward compatibility
     ROS2_CREATE_SUBSCRIBER(Node, this, WrenchTopic, UROS2WrenchStampedMsg::StaticClass(), &UROSFlightComponent::HandleWrenchMsg);
-    ROS2_CREATE_SUBSCRIBER(Node, this, TEXT("/sim/pwm_output"), UROS2OutputRawMsg::StaticClass(), &UROSFlightComponent::HandlePWMOutputMsg);
     ROS2_CREATE_SERVICE_SERVER(Node, this, TEXT("/sil_board/run"), UROS2StdSrvSetBoolSrv::StaticClass(), &UROSFlightComponent::HandleRunService);
 
     UE_LOG(LogROSFlight, Warning, TEXT("ROSFlightComponent %p initialized successfully (Owner: %s)"), 
@@ -160,7 +173,10 @@ void UROSFlightComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
     // High frequency (every tick)
     if (TickCounter % 1 == 0)
     {
-        PublishIMU();
+        if (bPublishSensorData)
+        {
+            PublishIMU();
+        }
         PublishTruthState();
         
         // Publish commands when ROSflight mode is active
@@ -191,7 +207,7 @@ void UROSFlightComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
     }
 
     // Lower frequency sensors (every 6 ticks)
-    if (TickCounter % 6 == 0)
+    if (TickCounter % 6 == 0 && bPublishSensorData)
     {
         PublishMinimalSensors();
     }
@@ -474,40 +490,49 @@ void UROSFlightComponent::HandleWrenchMsg(const UROS2GenericMsg* InMsg)
     FROSWrenchStamped WrenchData;
     WrenchMsg->GetMsg(WrenchData);
 
-    // Convert forces and torques from ROS to Unreal coordinates
-    const FVector ForceBody = FVector(
+    // ROSflight multirotor_forces_and_moments publishes forces in NED frame (body frame)
+    // Force.X = forward, Force.Y = right, Force.Z = down
+    const FVector ForceNED = FVector(
         WrenchData.Wrench.Force.X,
         WrenchData.Wrench.Force.Y,
         WrenchData.Wrench.Force.Z
     );
-    const FVector TorqueBody = FVector(
+    const FVector TorqueNED = FVector(
         WrenchData.Wrench.Torque.X,
         WrenchData.Wrench.Torque.Y,
         WrenchData.Wrench.Torque.Z
     );
 
     // Debug logging to check received forces
-    UE_LOG(LogROSFlight, Warning, TEXT("Received forces: F=(%.6f,%.6f,%.6f), T=(%.6f,%.6f,%.6f)"), 
-           ForceBody.X, ForceBody.Y, ForceBody.Z, TorqueBody.X, TorqueBody.Y, TorqueBody.Z);
+    static int ForceLogCounter = 0;
+    if (ForceLogCounter++ % 50 == 0) // Log every 50th message to reduce spam
+    {
+        UE_LOG(LogROSFlight, Warning, TEXT("Received NED forces: F=(%.3f,%.3f,%.3f) N, T=(%.3f,%.3f,%.3f) Nm"), 
+               ForceNED.X, ForceNED.Y, ForceNED.Z, TorqueNED.X, TorqueNED.Y, TorqueNED.Z);
+    }
 
-    // Apply forces and torques in world frame
-    const FQuat WorldQuat = GetOwner()->GetActorQuat();
-    const FVector ForceUnreal = RosToUnreal(ForceBody);
-    const FVector TorqueUnreal = RosToUnreal(TorqueBody);
-    const FVector ForceWorld = WorldQuat.RotateVector(ForceUnreal) * 100.0f;
-    const FVector TorqueWorld = WorldQuat.RotateVector(TorqueUnreal);
-    
-    UE_LOG(LogROSFlight, Warning, TEXT("Force conversion: ROS=(%.6f,%.6f,%.6f) -> Unreal=(%.6f,%.6f,%.6f) -> World=(%.1f,%.1f,%.1f)"), 
-           ForceBody.X, ForceBody.Y, ForceBody.Z, ForceUnreal.X, ForceUnreal.Y, ForceUnreal.Z, ForceWorld.X, ForceWorld.Y, ForceWorld.Z);
-    
-    UE_LOG(LogROSFlight, Warning, TEXT("Torque conversion: ROS=(%.6f,%.6f,%.6f) -> Unreal=(%.6f,%.6f,%.6f) -> World=(%.6f,%.6f,%.6f)"), 
-           TorqueBody.X, TorqueBody.Y, TorqueBody.Z, TorqueUnreal.X, TorqueUnreal.Y, TorqueUnreal.Z, TorqueWorld.X, TorqueWorld.Y, TorqueWorld.Z);
+    // The forces from multirotor_forces_and_moments are in NED body frame
+    // Gazebo expects NWU, so it converts: force(x, -y, -z) and torque(x, -y, -z)
+    // For Unreal (which uses ENU-like with Z-up), we need to convert from NED:
+    // NED: X=Forward, Y=Right, Z=Down
+    // Unreal: X=Forward, Y=Right, Z=Up
+    const FVector ForceUnreal = FVector(ForceNED.X, ForceNED.Y, -ForceNED.Z) * 100.0f; // Convert N to cm
+    const FVector TorqueUnreal = FVector(TorqueNED.X, TorqueNED.Y, -TorqueNED.Z); // Radians
     
     if (Body)
     {
-        Body->AddForce(ForceWorld, NAME_None, true); // Convert N to cm
-        Body->AddTorqueInRadians(TorqueWorld, NAME_None, true);
-        UE_LOG(LogROSFlight, Warning, TEXT("Forces applied to physics body successfully"));
+        // Apply forces and torques in body frame (relative to the drone)
+        // This matches Gazebo's AddRelativeForce/AddRelativeTorque
+        const FQuat WorldQuat = Body->GetComponentQuat();
+        const FVector ForceWorld = WorldQuat.RotateVector(ForceUnreal);
+        Body->AddForce(ForceWorld, NAME_None, true); // Apply in world space after rotation
+        Body->AddTorqueInRadians(WorldQuat.RotateVector(TorqueUnreal), NAME_None, true); // Apply in world space
+        
+        if (ForceLogCounter % 50 == 0)
+        {
+            UE_LOG(LogROSFlight, Warning, TEXT("Applied body forces: F=(%.1f,%.1f,%.1f) cm*N, T=(%.3f,%.3f,%.3f) rad"), 
+                   ForceUnreal.X, ForceUnreal.Y, ForceUnreal.Z, TorqueUnreal.X, TorqueUnreal.Y, TorqueUnreal.Z);
+        }
     }
     else
     {
@@ -516,98 +541,7 @@ void UROSFlightComponent::HandleWrenchMsg(const UROS2GenericMsg* InMsg)
 }
 
 
-void UROSFlightComponent::HandlePWMOutputMsg(const UROS2GenericMsg* InMsg)
-{
-    const auto* PWMMsg = Cast<UROS2OutputRawMsg>(InMsg);
-    if (!PWMMsg || !Body) return;
-
-    FROSOutputRaw PWMData;
-    PWMMsg->GetMsg(PWMData);
-
-    UE_LOG(LogROSFlight, Warning, TEXT("PWM received: [%.0f, %.0f, %.0f, %.0f]"), 
-           PWMData.Values[0], PWMData.Values[1], PWMData.Values[2], PWMData.Values[3]);
-
-    // Motor model parameters (like Gazebo ROSFlight)
-    const float PWMMin = 1000.0f;
-    const float PWMMax = 2000.0f;
-    const float MaxThrust = 40.0f;  // Newtons per motor
-    const float MaxTorque = 0.5f;   // Nm per motor
-    const float ArmLength = 0.325f; // meters (from parameters)
-
-    // Quadcopter motor layout (X configuration)
-    // Motor 0: Front Right  (+X+Y)
-    // Motor 1: Back Right   (-X+Y)  
-    // Motor 2: Back Left    (-X-Y)
-    // Motor 3: Front Left   (+X-Y)
-    
-    FVector TotalForce = FVector::ZeroVector;
-    FVector TotalTorque = FVector::ZeroVector;
-    
-    for (int i = 0; i < 4; i++)
-    {
-        // Convert PWM to normalized thrust (0-1)
-        float PWMValue = FMath::Clamp(PWMData.Values[i], PWMMin, PWMMax);
-        float NormalizedThrust = (PWMValue - PWMMin) / (PWMMax - PWMMin);
-        
-        // Quadratic thrust model: T = k * PWM^2 (more realistic)
-        float Thrust = MaxThrust * NormalizedThrust * NormalizedThrust;
-        
-        // Torque is proportional to thrust
-        float MotorTorque = MaxTorque * NormalizedThrust * NormalizedThrust;
-        
-        // Add upward thrust
-        TotalForce.Z -= Thrust; // Negative Z for upward thrust in ROS/NED
-        
-        // Add torques based on motor position and rotation direction
-        switch (i)
-        {
-            case 0: // Front Right: +roll, +pitch, -yaw
-                TotalTorque.X += Thrust * ArmLength * 0.707f; // Roll
-                TotalTorque.Y += Thrust * ArmLength * 0.707f; // Pitch
-                TotalTorque.Z -= MotorTorque; // Yaw (CCW)
-                break;
-            case 1: // Back Right: +roll, -pitch, +yaw
-                TotalTorque.X += Thrust * ArmLength * 0.707f; // Roll
-                TotalTorque.Y -= Thrust * ArmLength * 0.707f; // Pitch
-                TotalTorque.Z += MotorTorque; // Yaw (CW)
-                break;
-            case 2: // Back Left: -roll, -pitch, -yaw
-                TotalTorque.X -= Thrust * ArmLength * 0.707f; // Roll
-                TotalTorque.Y -= Thrust * ArmLength * 0.707f; // Pitch
-                TotalTorque.Z -= MotorTorque; // Yaw (CCW)
-                break;
-            case 3: // Front Left: -roll, +pitch, +yaw
-                TotalTorque.X -= Thrust * ArmLength * 0.707f; // Roll
-                TotalTorque.Y += Thrust * ArmLength * 0.707f; // Pitch
-                TotalTorque.Z += MotorTorque; // Yaw (CW)
-                break;
-        }
-    }
-
-    UE_LOG(LogROSFlight, Warning, TEXT("Motor model output: F=(%.3f,%.3f,%.3f), T=(%.3f,%.3f,%.3f)"), 
-           TotalForce.X, TotalForce.Y, TotalForce.Z, TotalTorque.X, TotalTorque.Y, TotalTorque.Z);
-
-    // Apply forces and torques in world frame (same as HandleWrenchMsg)
-    const FQuat WorldQuat = GetOwner()->GetActorQuat();
-    const FVector ForceUnreal = RosToUnreal(TotalForce);
-    const FVector TorqueUnreal = RosToUnreal(TotalTorque);
-    const FVector ForceWorld = WorldQuat.RotateVector(ForceUnreal) * 100.0f; // Convert N to cm
-    const FVector TorqueWorld = WorldQuat.RotateVector(TorqueUnreal);
-    
-    UE_LOG(LogROSFlight, Warning, TEXT("Applied PWM forces: F=(%.1f,%.1f,%.1f), T=(%.3f,%.3f,%.3f)"), 
-           ForceWorld.X, ForceWorld.Y, ForceWorld.Z, TorqueWorld.X, TorqueWorld.Y, TorqueWorld.Z);
-    
-    if (Body)
-    {
-        Body->AddForce(ForceWorld, NAME_None, true);
-        Body->AddTorqueInRadians(TorqueWorld, NAME_None, true);
-        UE_LOG(LogROSFlight, Warning, TEXT("PWM forces applied successfully!"));
-    }
-    else
-    {
-        UE_LOG(LogROSFlight, Error, TEXT("Physics body is null! Cannot apply PWM forces"));
-    }
-}
+// Removed HandlePWMOutputMsg - multirotor_forces_and_moments node handles PWM to force conversion
 
 void UROSFlightComponent::HandleRunService(UROS2GenericSrv* InSrv)
 {

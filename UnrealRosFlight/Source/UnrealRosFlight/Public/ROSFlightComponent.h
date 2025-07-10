@@ -33,6 +33,10 @@ public:
 
     UPROPERTY(EditAnywhere, Category = "ROSflight Networking")
     int32 Port = 14525;
+    
+    // Publishing Configuration
+    UPROPERTY(EditAnywhere, Category = "ROSflight Publishing")
+    bool bPublishSensorData = false;  // Set to false when using rosflight_sim's standalone_sensors
 
 protected:
     virtual void BeginPlay() override;
@@ -41,7 +45,7 @@ protected:
 
 private:
     // ROS2 Topics - FIXED to match ROSFlight expectations
-    UPROPERTY(EditAnywhere, Category="ROS2") FString WrenchTopic   = TEXT("/forces_and_moments");
+    UPROPERTY(EditAnywhere, Category="ROS2") FString WrenchTopic   = TEXT("/sim/wrench");  // Deprecated - we use /forces_and_moments now
     UPROPERTY(EditAnywhere, Category="ROS2") FString SimStateTopic = TEXT("/sim/truth_state");
     UPROPERTY(EditAnywhere, Category="ROS2") FString ImuTopic      = TEXT("/simulated_sensors/imu/data");
     UPROPERTY(EditAnywhere, Category="ROS2") FString CommandTopic  = TEXT("/command");
@@ -94,7 +98,6 @@ public:
     
     // Callbacks
     UFUNCTION() void HandleWrenchMsg(const UROS2GenericMsg* InMsg);
-    UFUNCTION() void HandlePWMOutputMsg(const UROS2GenericMsg* InMsg);
     UFUNCTION() void HandleRunService(UROS2GenericSrv* InService);
     
 private:
