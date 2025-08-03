@@ -230,7 +230,7 @@ void AROS2Controller::HandleImuData(const UROS2GenericMsg* InMsg)
         UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Attitude command - Roll: %.2f, Pitch: %.2f, Yaw: %.2f"), RollDeg, PitchDeg, YawDeg);
         // Send attitude command to QuadPawn
         FVector EulerAngles = FVector(RollDeg, PitchDeg, YawDeg);
-        FString Command = FString::Printf(TEXT("SetExternalAttitudeCommand (%s)"), *EulerAngles.ToString());
+        FString Command = FString::Printf(TEXT("SetExternalAttitudeCommand InRoll=%f InPitch=%f"), RollDeg, PitchDeg);
         Pawn->CallFunctionByNameWithArguments(*Command, *GLog, nullptr, true);
     }
 

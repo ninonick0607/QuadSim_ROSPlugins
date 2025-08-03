@@ -33,7 +33,7 @@ class UActorComponent;
 
 #include "ROS2Controller.generated.h"
 
-UCLASS()
+UCLASS(Blueprintable, BlueprintType)
 class UNREALROSFLIGHT_API AROS2Controller : public AActor
 {
     GENERATED_BODY()
