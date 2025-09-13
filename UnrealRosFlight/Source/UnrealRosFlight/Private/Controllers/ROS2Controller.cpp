@@ -10,6 +10,7 @@
     #include "RHICommandList.h"
     #include "RenderingThread.h"
     #include "Camera/CameraComponent.h"
+    #include "Misc/App.h"
 
     // --- ROS 2 Includes ---
     #include "ROS2NodeComponent.h"
@@ -47,17 +48,17 @@
 
 
 
-    AROS2Controller::AROS2Controller()
+AROS2Controller::AROS2Controller()
     {
         PrimaryActorTick.bCanEverTick = false;
         Node = CreateDefaultSubobject<UROS2NodeComponent>(TEXT("ROS2NodeComponent"));
         SceneCapture = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("SceneCapture"));
         RenderTargets.SetNum(2);
-    }
+}
 
-    void AROS2Controller::BeginPlay()
-    {
-        Super::BeginPlay();
+void AROS2Controller::BeginPlay()
+{
+    Super::BeginPlay();
 
         // --- Pawn Validation ---
         APawn* Pawn = Cast<APawn>(GetAttachParentActor());
@@ -75,7 +76,7 @@
             UE_LOG(LogTemp, Warning, TEXT("AROS2Controller::BeginPlay - No camera component found. Image capture will be disabled."));
         }
 
-        // --- Node Initialization ---
+    // --- Node Initialization ---
         FString UniqueNodeName = NodeName;
         if (Pawn) UniqueNodeName = NodeName + TEXT("_") + Pawn->GetFName().ToString();
         UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Initializing ROS2 Node '%s' in namespace '%s'"), *UniqueNodeName, *Namespace);
@@ -83,24 +84,51 @@
         Node->Namespace = Namespace;
         Node->Init();
 
-        // --- Setup Publishers ---
+    // Helper: compute a frame-safe frequency based on fixed delta time (adds headroom)
+    auto ComputeSafeHz = [](float DesiredHz) -> float
+    {
+        const float Step = FApp::GetFixedDeltaTime(); // 0 if unset; otherwise fixed tick interval
+        if (Step > 0.f && DesiredHz > 0.f)
+        {
+            const float MaxHz = 1.f / Step;     // engine tick cap
+            const float SafeMax = MaxHz * 0.9f; // 10% headroom to avoid timer underruns
+            return FMath::Min(DesiredHz, SafeMax);
+        }
+        return DesiredHz;
+    };
+
+    // Precompute safe rates
+    const float OdomHzSafe = ComputeSafeHz(OdometryFrequencyHz);
+    const float GoalHzSafe = ComputeSafeHz(GoalFrequenzyHz);
+    const float ImgHzSafe  = ComputeSafeHz(ImageFrequencyHz);
+    const float CollHzSafe = ComputeSafeHz(CollisionFrequencyHz);
+    const float TFHzSafe   = ComputeSafeHz(TFFrequencyHz);
+
+    UE_LOG(LogTemp, Log, TEXT("ROS2Controller rates (desired -> effective): Odom %.1f->%.1f Hz, TF %.1f->%.1f Hz, Image %.1f->%.1f Hz, Collision %.1f->%.1f Hz, Goal %.1f->%.1f Hz"),
+        OdometryFrequencyHz, OdomHzSafe,
+        TFFrequencyHz, TFHzSafe,
+        ImageFrequencyHz, ImgHzSafe,
+        CollisionFrequencyHz, CollHzSafe,
+        GoalFrequenzyHz, GoalHzSafe);
+
+    // --- Setup Publishers ---
         UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *OdometryTopicName);
-        ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, OdometryTopicName, UROS2Publisher::StaticClass(), UROS2OdomMsg::StaticClass(), OdometryFrequencyHz, &AROS2Controller::UpdateOdometryMessage, UROS2QoS::Default, OdometryPublisher);
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, OdometryTopicName, UROS2Publisher::StaticClass(), UROS2OdomMsg::StaticClass(), OdomHzSafe, &AROS2Controller::UpdateOdometryMessage, UROS2QoS::Default, OdometryPublisher);
         UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *PositionGoalTopicName);
-        ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, PositionGoalTopicName, UROS2Publisher::StaticClass(), UROS2PointMsg::StaticClass(), GoalFrequenzyHz, &AROS2Controller::UpdateGoalPositionMessage, UROS2QoS::Default, GoalPosition);
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, PositionGoalTopicName, UROS2Publisher::StaticClass(), UROS2PointMsg::StaticClass(), GoalHzSafe, &AROS2Controller::UpdateGoalPositionMessage, UROS2QoS::Default, GoalPosition);
         if (bCanCaptureImages) {
             UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *ImageTopicName);
-            ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, ImageTopicName, UROS2Publisher::StaticClass(), UROS2ImgMsg::StaticClass(), ImageFrequencyHz, &AROS2Controller::UpdateImageMessage, UROS2QoS::SensorData, ImagePublisher);
-        }
-        UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *CollisionTopicName);
-        ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, CollisionTopicName, UROS2Publisher::StaticClass(), UROS2Float64Msg::StaticClass(), 10, &AROS2Controller::UpdateCollisionMessage, UROS2QoS::Default, CollisionPublisher);
+        ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, ImageTopicName, UROS2Publisher::StaticClass(), UROS2ImgMsg::StaticClass(), ImgHzSafe, &AROS2Controller::UpdateImageMessage, UROS2QoS::SensorData, ImagePublisher);
+    }
+    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *CollisionTopicName);
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, CollisionTopicName, UROS2Publisher::StaticClass(), UROS2Float64Msg::StaticClass(), CollHzSafe, &AROS2Controller::UpdateCollisionMessage, UROS2QoS::Default, CollisionPublisher);
 
         // TF Publisher (**USING CORRECT CLASS NAME**)
         UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *TFTopicName);
-        ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
-          Node, this, TFTopicName, UROS2Publisher::StaticClass(),
-          UROS2TFMsgMsg::StaticClass(), // *** Use the actual class name from ROS2TFMsg.h ***
-          TFFrequencyHz, &AROS2Controller::UpdateTFMessage, UROS2QoS::Default, TfPublisher);
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
+      Node, this, TFTopicName, UROS2Publisher::StaticClass(),
+      UROS2TFMsgMsg::StaticClass(),
+      TFHzSafe, &AROS2Controller::UpdateTFMessage, UROS2QoS::DynamicBroadcaster, TfPublisher);
 
         // --- Setup Obstacle Manager ---
         SetupObstacleManager();
@@ -121,8 +149,8 @@
         // --- Image Capture Initialization ---
         if (bCanCaptureImages) {
             InitializeImageCapture();
-            if (ImageFrequencyHz > 0 && GetWorld()) {
-                GetWorld()->GetTimerManager().SetTimer(CaptureTimerHandle, this, &AROS2Controller::CaptureImage, 1.0f / ImageFrequencyHz, true);
+            if (ImgHzSafe > 0 && GetWorld()) {
+                GetWorld()->GetTimerManager().SetTimer(CaptureTimerHandle, this, &AROS2Controller::CaptureImage, 1.0f / ImgHzSafe, true);
             }
         }
 

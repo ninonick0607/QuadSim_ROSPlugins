@@ -59,7 +59,7 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Odometry")
     FString OdometryTopicName = TEXT("/odom");
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Odometry")
-    float OdometryFrequencyHz = 30.f;
+    float OdometryFrequencyHz = 20.f; // Safer default vs 30 FPS engine step
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Position")
     FString PositionTopicName = TEXT("/drone/position"); // Maybe remove if unused?
@@ -73,18 +73,20 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Collision")
     FString CollisionTopicName = TEXT("/drone/collision");
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Collision")
+    float CollisionFrequencyHz = 10.f;
 
     UPROPERTY(EditAnywhere, Category="ROS2|Publishers|TF")
     FString TFTopicName = TEXT("/tf");
     UPROPERTY(EditAnywhere, Category="ROS2|Publishers|TF")
-    float TFFrequencyHz = 30.f;
+    float TFFrequencyHz = 20.f; // Safer default vs 30 FPS engine step
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
     FString ImageTopicName = TEXT("/camera/image");
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
-    float ImageFrequencyHz = 15.f;
+    float ImageFrequencyHz = 10.f; // Reduce cost; image encode can exceed 66ms
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
-    FIntPoint ImageResolution = FIntPoint(128, 128);
+    FIntPoint ImageResolution = FIntPoint(96, 96); // Lower default to reduce per-frame work
 
     // --- Subscriber Topics ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
