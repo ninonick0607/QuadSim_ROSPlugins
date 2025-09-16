@@ -60,587 +60,589 @@ void AROS2Controller::BeginPlay()
 {
     Super::BeginPlay();
 
-        // --- Pawn Validation ---
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!IsValid(Pawn))
-        {
-            UE_LOG(LogTemp, Error, TEXT("AROS2Controller::BeginPlay - Owning Pawn not found! Aborting."));
-            return;
-        }
-        
-        // Check for camera component for image capture
-        UActorComponent* CameraComponent = Pawn->GetComponentByClass(UCameraComponent::StaticClass());
-        bool bCanCaptureImages = IsValid(CameraComponent);
-        if (!bCanCaptureImages)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("AROS2Controller::BeginPlay - No camera component found. Image capture will be disabled."));
-        }
+    // --- Pawn Validation ---
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!IsValid(Pawn))
+    {
+        UE_LOG(LogTemp, Error, TEXT("AROS2Controller::BeginPlay - Owning Pawn not found! Aborting."));
+        return;
+    }
+    
+    // Check for camera component for image capture
+    UActorComponent* CameraComponent = Pawn->GetComponentByClass(UCameraComponent::StaticClass());
+    bool bCanCaptureImages = IsValid(CameraComponent);
+    if (!bCanCaptureImages)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller::BeginPlay - No camera component found. Image capture will be disabled."));
+    }
 
     // --- Node Initialization ---
-        FString UniqueNodeName = NodeName;
-        if (Pawn) UniqueNodeName = NodeName + TEXT("_") + Pawn->GetFName().ToString();
-        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Initializing ROS2 Node '%s' in namespace '%s'"), *UniqueNodeName, *Namespace);
-        Node->Name = UniqueNodeName;
-        Node->Namespace = Namespace;
-        Node->Init();
+    FString UniqueNodeName = NodeName;
+    if (Pawn) UniqueNodeName = NodeName + TEXT("_") + Pawn->GetFName().ToString();
+    UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Initializing ROS2 Node '%s' in namespace '%s'"), *UniqueNodeName, *Namespace);
+    Node->Name = UniqueNodeName;
+    Node->Namespace = Namespace;
+    Node->Init();
 
-    // Helper: compute a frame-safe frequency based on fixed delta time (adds headroom)
+    // Helper: compute a frame-safe frequency based on fixed delta time (adds headroom and quantizes to whole frames)
     auto ComputeSafeHz = [](float DesiredHz) -> float
     {
         const float Step = FApp::GetFixedDeltaTime(); // 0 if unset; otherwise fixed tick interval
         if (Step > 0.f && DesiredHz > 0.f)
         {
-            const float MaxHz = 1.f / Step;     // engine tick cap
-            const float SafeMax = MaxHz * 0.9f; // 10% headroom to avoid timer underruns
-            return FMath::Min(DesiredHz, SafeMax);
+            const float MaxHz = 1.f / Step;      // engine tick cap
+            const float SafeMax = MaxHz * 0.9f;  // 10% headroom to avoid timer underruns
+            const float Clamped = FMath::Min(DesiredHz, SafeMax);
+    
+            // Quantize to an integer number of frames to avoid impossible deadlines (align timer to Tick multiples)
+            const float Period = 1.f / Clamped;
+            const int32 FramesPerPeriod = FMath::Max(1, FMath::RoundToInt(Period / Step));
+            const float QuantizedPeriod = FramesPerPeriod * Step;
+            const float QuantizedHz = 1.f / QuantizedPeriod;
+            return QuantizedHz;
         }
         return DesiredHz;
     };
-
+    
     // Precompute safe rates
     const float OdomHzSafe = ComputeSafeHz(OdometryFrequencyHz);
     const float GoalHzSafe = ComputeSafeHz(GoalFrequenzyHz);
     const float ImgHzSafe  = ComputeSafeHz(ImageFrequencyHz);
     const float CollHzSafe = ComputeSafeHz(CollisionFrequencyHz);
     const float TFHzSafe   = ComputeSafeHz(TFFrequencyHz);
-
-    UE_LOG(LogTemp, Log, TEXT("ROS2Controller rates (desired -> effective): Odom %.1f->%.1f Hz, TF %.1f->%.1f Hz, Image %.1f->%.1f Hz, Collision %.1f->%.1f Hz, Goal %.1f->%.1f Hz"),
-        OdometryFrequencyHz, OdomHzSafe,
-        TFFrequencyHz, TFHzSafe,
-        ImageFrequencyHz, ImgHzSafe,
-        CollisionFrequencyHz, CollHzSafe,
-        GoalFrequenzyHz, GoalHzSafe);
-
+    
+    UE_LOG(LogTemp, Log, TEXT("ROS2Controller rates (desired -> effective): Odom %.1f->%.1f Hz, TF %.1f->%.1f Hz, Image %.1f->%.1f Hz, Collision %.1f->%.1f Hz, Goal %.1f->%.1f Hz. Step=%.4fs"),OdometryFrequencyHz, OdomHzSafe,TFFrequencyHz, TFHzSafe,ImageFrequencyHz, ImgHzSafe,CollisionFrequencyHz, CollHzSafe,GoalFrequenzyHz, GoalHzSafe,FApp::GetFixedDeltaTime());
+    
     // --- Setup Publishers ---
-        UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *OdometryTopicName);
+    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *OdometryTopicName);
     ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, OdometryTopicName, UROS2Publisher::StaticClass(), UROS2OdomMsg::StaticClass(), OdomHzSafe, &AROS2Controller::UpdateOdometryMessage, UROS2QoS::Default, OdometryPublisher);
-        UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *PositionGoalTopicName);
+    
+    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *PositionGoalTopicName);
     ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, PositionGoalTopicName, UROS2Publisher::StaticClass(), UROS2PointMsg::StaticClass(), GoalHzSafe, &AROS2Controller::UpdateGoalPositionMessage, UROS2QoS::Default, GoalPosition);
-        if (bCanCaptureImages) {
-            UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *ImageTopicName);
+    
+    if (bCanCaptureImages) {
+        UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *ImageTopicName);
         ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, ImageTopicName, UROS2Publisher::StaticClass(), UROS2ImgMsg::StaticClass(), ImgHzSafe, &AROS2Controller::UpdateImageMessage, UROS2QoS::SensorData, ImagePublisher);
     }
+    
     UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *CollisionTopicName);
     ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, CollisionTopicName, UROS2Publisher::StaticClass(), UROS2Float64Msg::StaticClass(), CollHzSafe, &AROS2Controller::UpdateCollisionMessage, UROS2QoS::Default, CollisionPublisher);
-
+    
         // TF Publisher (**USING CORRECT CLASS NAME**)
-        UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *TFTopicName);
+    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *TFTopicName);
     ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
-      Node, this, TFTopicName, UROS2Publisher::StaticClass(),
-      UROS2TFMsgMsg::StaticClass(),
-      TFHzSafe, &AROS2Controller::UpdateTFMessage, UROS2QoS::DynamicBroadcaster, TfPublisher);
-
-        // --- Setup Obstacle Manager ---
-        SetupObstacleManager();
-
-        // --- Setup Subscribers ---
-        UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ObstacleTopicName);
-        ROS2_CREATE_SUBSCRIBER(Node,this,ObstacleTopicName,UROS2Float64Msg::StaticClass(),&AROS2Controller::HandleObstacleMessage);
-        UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *CmdVelTopicName);
-        ROS2_CREATE_SUBSCRIBER( Node, this, CmdVelTopicName, UROS2TwistMsg::StaticClass(), &AROS2Controller::HandleVelocityCommand);
-        UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ResetTopicName);
-        ROS2_CREATE_SUBSCRIBER( Node, this, ResetTopicName, UROS2EmptyMsg::StaticClass(), &AROS2Controller::HandleResetCommand);
-        UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *HoverTopicName);
-        ROS2_CREATE_SUBSCRIBER( Node, this, HoverTopicName, UROS2Float64Msg::StaticClass(), &AROS2Controller::HandleHoverCommand);
-        UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *AttitudeEulerTopicName);
-        ROS2_CREATE_SUBSCRIBER(Node,this,AttitudeEulerTopicName,UROS2Vec3StampedMsg::StaticClass(),&AROS2Controller::HandleAttitudeEuler);
-        UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ImuTopicName);
-        ROS2_CREATE_SUBSCRIBER(Node, this, ImuTopicName, UROS2ImuMsg::StaticClass(), &AROS2Controller::HandleImuData);
-        // --- Image Capture Initialization ---
-        if (bCanCaptureImages) {
-            InitializeImageCapture();
-            if (ImgHzSafe > 0 && GetWorld()) {
-                GetWorld()->GetTimerManager().SetTimer(CaptureTimerHandle, this, &AROS2Controller::CaptureImage, 1.0f / ImgHzSafe, true);
-            }
+    Node, this, TFTopicName, UROS2Publisher::StaticClass(),
+    UROS2TFMsgMsg::StaticClass(),
+    TFHzSafe, &AROS2Controller::UpdateTFMessage, UROS2QoS::DynamicBroadcaster, TfPublisher);
+    
+    // --- Setup Obstacle Manager ---
+    SetupObstacleManager();
+    
+    // --- Setup Subscribers ---
+    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ObstacleTopicName);
+    ROS2_CREATE_SUBSCRIBER(Node,this,ObstacleTopicName,UROS2Float64Msg::StaticClass(),&AROS2Controller::HandleObstacleMessage);
+    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *CmdVelTopicName);
+    ROS2_CREATE_SUBSCRIBER( Node, this, CmdVelTopicName, UROS2TwistMsg::StaticClass(), &AROS2Controller::HandleVelocityCommand);
+    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ResetTopicName);
+    ROS2_CREATE_SUBSCRIBER( Node, this, ResetTopicName, UROS2EmptyMsg::StaticClass(), &AROS2Controller::HandleResetCommand);
+    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *HoverTopicName);
+    ROS2_CREATE_SUBSCRIBER( Node, this, HoverTopicName, UROS2Float64Msg::StaticClass(), &AROS2Controller::HandleHoverCommand);
+    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *AttitudeEulerTopicName);
+    ROS2_CREATE_SUBSCRIBER(Node,this,AttitudeEulerTopicName,UROS2Vec3StampedMsg::StaticClass(),&AROS2Controller::HandleAttitudeEuler);
+    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ImuTopicName);
+    ROS2_CREATE_SUBSCRIBER(Node, this, ImuTopicName, UROS2ImuMsg::StaticClass(), &AROS2Controller::HandleImuData);
+    // --- Image Capture Initialization ---
+    if (bCanCaptureImages) {
+        InitializeImageCapture();
+        if (ImgHzSafe > 0 && GetWorld()) {
+            GetWorld()->GetTimerManager().SetTimer(CaptureTimerHandle, this, &AROS2Controller::CaptureImage, 1.0f / ImgHzSafe, true);
         }
-
-        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller initialization complete for %s."), *Pawn->GetName());
     }
+    
+    UE_LOG(LogTemp, Warning, TEXT("AROS2Controller initialization complete for %s."), *Pawn->GetName());
+}
 
-    void AROS2Controller::EndPlay(const EEndPlayReason::Type EndPlayReason)
+void AROS2Controller::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (GetWorld()) // Check if World is valid
     {
-        if (GetWorld()) // Check if World is valid
-        {
-            GetWorld()->GetTimerManager().ClearTimer(CaptureTimerHandle);
-        }
-
-        Super::EndPlay(EndPlayReason);
-        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller EndPlay called."));
+        GetWorld()->GetTimerManager().ClearTimer(CaptureTimerHandle);
     }
+
+    Super::EndPlay(EndPlayReason);
+    UE_LOG(LogTemp, Warning, TEXT("AROS2Controller EndPlay called."));
+}
 
 void AROS2Controller::HandleImuData(const UROS2GenericMsg* InMsg)
+{
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    UActorComponent* DroneController = Pawn ? Pawn->GetComponentByClass(UActorComponent::StaticClass()) : nullptr;
+    if (!InMsg)
     {
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        UActorComponent* DroneController = Pawn ? Pawn->GetComponentByClass(UActorComponent::StaticClass()) : nullptr;
-        if (!InMsg)
-        {
-            UE_LOG(LogTemp, Error, TEXT("HandleImuData: InMsg is null"));
-            return;
-        }
-
-        const UROS2ImuMsg* ImuMsgWrapper = Cast<UROS2ImuMsg>(InMsg);
-        if (!ImuMsgWrapper)
-        {
-            UE_LOG(LogTemp, Error, TEXT("HandleImuData: Cast to UROS2ImuMsg failed"));
-            return;
-        }
-
-        FROSImu ImuData;
-        ImuMsgWrapper->GetMsg(ImuData);
-
-        // Convert radians/s to degrees/s
-        const FVector AngularVelocityRad = ImuData.AngularVelocity;
-        const FVector AngularVelocityDeg = FMath::RadiansToDegrees(AngularVelocityRad);
-
-        // Optional: log it
-        UE_LOG(LogTemp, Log, TEXT("IMU Angular Velocity [deg/s]: X=%.2f Y=%.2f Z=%.2f"),
-            AngularVelocityDeg.X,
-            AngularVelocityDeg.Y,
-            AngularVelocityDeg.Z);
-
-        // Send yaw rate command to drone controller via generic interface
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Received yaw rate command: %.2f deg/s"), AngularVelocityDeg.Z);
-        
+        UE_LOG(LogTemp, Error, TEXT("HandleImuData: InMsg is null"));
+        return;
     }
 
-    void AROS2Controller::SetupObstacleManager()
+    const UROS2ImuMsg* ImuMsgWrapper = Cast<UROS2ImuMsg>(InMsg);
+    if (!ImuMsgWrapper)
     {
-        // Skip obstacle manager setup - this should be handled by the main simulation
-        // ROS2Controller just publishes/subscribes to obstacle data
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Obstacle manager setup skipped - handled by main simulation"));
-        ObstacleManagerInstance = nullptr;
+        UE_LOG(LogTemp, Error, TEXT("HandleImuData: Cast to UROS2ImuMsg failed"));
+        return;
     }
 
-    void AROS2Controller::HandleHoverCommand(const UROS2GenericMsg* InMsg)
-    {
-        if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleHoverMessage: InMsg is null")); return; }
-        const UROS2Float64Msg* Float64MsgWrapper = Cast<UROS2Float64Msg>(InMsg); 
-        FROSFloat64 HoverData; 
-        Float64MsgWrapper->GetMsg(HoverData);
-        const int32 HoverHeight = FMath::RoundToInt(HoverData.Data);
-        UE_LOG(LogTemp, Log, TEXT("Received Hover Height: %d"), HoverHeight);
+    FROSImu ImuData;
+    ImuMsgWrapper->GetMsg(ImuData);
 
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleHoverCommand: Owning Pawn invalid")); return; }
-        UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
-        if (!IsValid(DroneController)) { UE_LOG(LogTemp, Warning, TEXT("HandleHoverCommand: DroneController invalid")); return; }
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Hover command received - Height: %.2f"), (float)HoverHeight);
-        // Send hover command to QuadPawn
-        FString Command = FString::Printf(TEXT("SetExternalHoverHeight %.2f"), (float)HoverHeight);
-        Pawn->CallFunctionByNameWithArguments(*Command, *GLog, nullptr, true);
+    // Convert radians/s to degrees/s
+    const FVector AngularVelocityRad = ImuData.AngularVelocity;
+    const FVector AngularVelocityDeg = FMath::RadiansToDegrees(AngularVelocityRad);
+
+    // Optional: log it
+    UE_LOG(LogTemp, Log, TEXT("IMU Angular Velocity [deg/s]: X=%.2f Y=%.2f Z=%.2f"),
+        AngularVelocityDeg.X,
+        AngularVelocityDeg.Y,
+        AngularVelocityDeg.Z);
+
+    // Send yaw rate command to drone controller via generic interface
+    UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Received yaw rate command: %.2f deg/s"), AngularVelocityDeg.Z);
+    
+}
+
+void AROS2Controller::SetupObstacleManager()
+{
+    // Skip obstacle manager setup - this should be handled by the main simulation
+    // ROS2Controller just publishes/subscribes to obstacle data
+    UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Obstacle manager setup skipped - handled by main simulation"));
+    ObstacleManagerInstance = nullptr;
+}
+
+void AROS2Controller::HandleHoverCommand(const UROS2GenericMsg* InMsg)
+{
+    if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleHoverMessage: InMsg is null")); return; }
+    const UROS2Float64Msg* Float64MsgWrapper = Cast<UROS2Float64Msg>(InMsg); 
+    FROSFloat64 HoverData; 
+    Float64MsgWrapper->GetMsg(HoverData);
+    const int32 HoverHeight = FMath::RoundToInt(HoverData.Data);
+    UE_LOG(LogTemp, Log, TEXT("Received Hover Height: %d"), HoverHeight);
+
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleHoverCommand: Owning Pawn invalid")); return; }
+    UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
+    if (!IsValid(DroneController)) { UE_LOG(LogTemp, Warning, TEXT("HandleHoverCommand: DroneController invalid")); return; }
+    UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Hover command received - Height: %.2f"), (float)HoverHeight);
+    // Send hover command to QuadPawn
+    FString Command = FString::Printf(TEXT("SetExternalHoverHeight %.2f"), (float)HoverHeight);
+    Pawn->CallFunctionByNameWithArguments(*Command, *GLog, nullptr, true);
+}
+
+void AROS2Controller::HandleAttitudeEuler(const UROS2GenericMsg* InMsg)
+{
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
+
+    if (!InMsg)
+    {
+        UE_LOG(LogTemp, Error, TEXT("HandleAttitudeEulerStamped: InMsg is null"));
+        return;
     }
 
-    void AROS2Controller::HandleAttitudeEuler(const UROS2GenericMsg* InMsg)
+    const UROS2Vec3StampedMsg* Vec3StampedMsg = Cast<UROS2Vec3StampedMsg>(InMsg);
+    if (!Vec3StampedMsg)
     {
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
-
-        if (!InMsg)
-        {
-            UE_LOG(LogTemp, Error, TEXT("HandleAttitudeEulerStamped: InMsg is null"));
-            return;
-        }
-
-        const UROS2Vec3StampedMsg* Vec3StampedMsg = Cast<UROS2Vec3StampedMsg>(InMsg);
-        if (!Vec3StampedMsg)
-        {
-            UE_LOG(LogTemp, Error, TEXT("HandleAttitudeEulerStamped: Cast failed"));
-            return;
-        }
-
-        FROSVec3Stamped StampedData;
-        Vec3StampedMsg->GetMsg(StampedData);
-
-        float RollDeg =  FMath::RadiansToDegrees(StampedData.Vector.X);
-        float PitchDeg = FMath::RadiansToDegrees(StampedData.Vector.Y);
-        float YawDeg =   FMath::RadiansToDegrees(StampedData.Vector.Z);
-
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Attitude command - Roll: %.2f, Pitch: %.2f, Yaw: %.2f"), RollDeg, PitchDeg, YawDeg);
-        // Send attitude command to QuadPawn
-        FVector EulerAngles = FVector(RollDeg, PitchDeg, YawDeg);
-        FString Command = FString::Printf(TEXT("SetExternalAttitudeCommand InRoll=%f InPitch=%f"), RollDeg, PitchDeg);
-        Pawn->CallFunctionByNameWithArguments(*Command, *GLog, nullptr, true);
+        UE_LOG(LogTemp, Error, TEXT("HandleAttitudeEulerStamped: Cast failed"));
+        return;
     }
 
-    void AROS2Controller::HandleObstacleMessage(const UROS2GenericMsg* InMsg)
+    FROSVec3Stamped StampedData;
+    Vec3StampedMsg->GetMsg(StampedData);
+
+    float RollDeg =  FMath::RadiansToDegrees(StampedData.Vector.X);
+    float PitchDeg = FMath::RadiansToDegrees(StampedData.Vector.Y);
+    float YawDeg =   FMath::RadiansToDegrees(StampedData.Vector.Z);
+
+    UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Attitude command - Roll: %.2f, Pitch: %.2f, Yaw: %.2f"), RollDeg, PitchDeg, YawDeg);
+    // Send attitude command to QuadPawn
+    FVector EulerAngles = FVector(RollDeg, PitchDeg, YawDeg);
+    FString Command = FString::Printf(TEXT("SetExternalAttitudeCommand InRoll=%f InPitch=%f"), RollDeg, PitchDeg);
+    Pawn->CallFunctionByNameWithArguments(*Command, *GLog, nullptr, true);
+}
+
+void AROS2Controller::HandleObstacleMessage(const UROS2GenericMsg* InMsg)
+{
+    if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: InMsg is null")); return; }
+    const UROS2Float64Msg* Float64MsgWrapper = Cast<UROS2Float64Msg>(InMsg); 
+    if (!Float64MsgWrapper) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: Invalid msg type")); return; }
+
+    if (!IsValid(ObstacleManagerInstance)) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: ObstacleManager invalid")); return; }
+
+    FROSFloat64 ObstacleData; 
+    Float64MsgWrapper->GetMsg(ObstacleData);
+    const int32 ObstacleCount = FMath::RoundToInt(ObstacleData.Data);
+    LastReceivedObstacleCount = ObstacleCount; 
+
+    UE_LOG(LogTemp, Log, TEXT("Received obstacle count: %d"), ObstacleCount);
+    // Obstacle creation not available from generic system - logged only
+    
+}
+
+void AROS2Controller::HandleVelocityCommand(const UROS2GenericMsg* InMsg)
+{
+
+    if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: InMsg is null")); return; }
+    const UROS2TwistMsg* TwistMsgWrapper = Cast<UROS2TwistMsg>(InMsg);
+    if (!TwistMsgWrapper) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: Invalid msg type")); return; }
+
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: Owning Pawn invalid")); return; }
+    UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
+    if (!IsValid(DroneController)) { UE_LOG(LogTemp, Warning, TEXT("HandleVelocityCommand: DroneController invalid")); return; }
+
+    FROSTwist TwistData;
+    TwistMsgWrapper->GetMsg(TwistData);
+
+    const float TargetLinearXVelocity_cms = TwistData.Linear.X;
+    const float TargetLinearYVelocity_cms = TwistData.Linear.Y;
+    const float TargetLinearZVelocity_cms = TwistData.Linear.Z;
+
+    FVector DesiredVelocityVector = FVector(TargetLinearXVelocity_cms, TargetLinearYVelocity_cms, TargetLinearZVelocity_cms);
+    const float TargetAngularZ_radps = TwistData.Angular.Z;
+    UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Velocity command - Linear: %s, Angular Z: %.2f"), *DesiredVelocityVector.ToString(), TargetAngularZ_radps);
+    
+    // Send command to QuadPawn via interface (using CallFunctionByNameWithArguments)
+    FVector AngularVelocityVector = FVector(0.0f, 0.0f, TargetAngularZ_radps);
+    FString Command = FString::Printf(TEXT("SetExternalVelocityCommand (%s) (%s)"), *DesiredVelocityVector.ToString(), *AngularVelocityVector.ToString());
+    Pawn->CallFunctionByNameWithArguments(*Command, *GLog, nullptr, true);
+
+}
+
+void AROS2Controller::HandleResetCommand(const UROS2GenericMsg* InMsg)
+{
+    UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Processing 'reset' command (received Empty message)..."));
+
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleResetCommand: Owning Pawn invalid")); return; }
+    UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
+    if (!IsValid(DroneController)) { UE_LOG(LogTemp, Warning, TEXT("HandleResetCommand: DroneController invalid! Cannot reset.")); return; }
+
+    UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Reset command received"));
+    // Send reset command to QuadPawn
+    Pawn->CallFunctionByNameWithArguments(TEXT("ResetDroneFromExternal"), *GLog, nullptr, true);
+    UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Reset command processed"));
+}
+
+void AROS2Controller::UpdateGoalPositionMessage(UROS2GenericMsg* InMessage)
+{
+    if (!InMessage) return;
+
+    FROSPoint GoalData;
+    // Goal position not available from generic system - use default
+    const FVector GoalLocation = FVector::ZeroVector;
+    
+    GoalData.X = GoalLocation.X;
+    GoalData.Y = GoalLocation.Y;
+    GoalData.Z = GoalLocation.Z;
+    
+    if(UROS2PointMsg* GoalMsg = Cast<UROS2PointMsg>(InMessage))
     {
-        if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: InMsg is null")); return; }
-        const UROS2Float64Msg* Float64MsgWrapper = Cast<UROS2Float64Msg>(InMsg); 
-        if (!Float64MsgWrapper) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: Invalid msg type")); return; }
+        GoalMsg->SetMsg(GoalData);
+    }
+    else { UE_LOG(LogTemp, Error, TEXT("UpdateGoalPositionMessage: Failed cast to UROS2PointMsg")); }
+}
 
-        if (!IsValid(ObstacleManagerInstance)) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: ObstacleManager invalid")); return; }
+void AROS2Controller::UpdateCollisionMessage(UROS2GenericMsg* InMessage)
+{
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!Pawn || !InMessage) return;
+    UROS2Float64Msg* Msg = Cast<UROS2Float64Msg>(InMessage);
+    if (!Msg) return;
+    FROSFloat64 CollisionData;
+    // Get collision state from QuadPawn interface
+    bool bCollisionState = false;
+    if (UFunction* CollisionFunc = Pawn->FindFunction(TEXT("GetDroneCollisionState")))
+    {
+        Pawn->ProcessEvent(CollisionFunc, &bCollisionState);
+    }
+    CollisionData.Data = bCollisionState ? 1.0 : 0.0;
+    Msg->SetMsg(CollisionData);
+}
 
-        FROSFloat64 ObstacleData; 
-        Float64MsgWrapper->GetMsg(ObstacleData);
-        const int32 ObstacleCount = FMath::RoundToInt(ObstacleData.Data);
-        LastReceivedObstacleCount = ObstacleCount; 
+void AROS2Controller::UpdateOdometryMessage(UROS2GenericMsg* InMessage)
+{
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!Pawn || !InMessage || !IsValid(OdometryPublisher)) return;
+    UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
+    if (!IsValid(DroneController)) return;
 
-        UE_LOG(LogTemp, Log, TEXT("Received obstacle count: %d"), ObstacleCount);
-        // Obstacle creation not available from generic system - logged only
-        
+    FROSOdom OdometryData;
+
+    // Header
+    FTimespan Time = FDateTime::UtcNow().GetTimeOfDay();
+    OdometryData.Header.Stamp.Sec = static_cast<int32>(Time.GetTotalSeconds());
+    OdometryData.Header.Stamp.Nanosec = static_cast<uint32>(Time.GetFractionNano());
+    OdometryData.Header.FrameId = TEXT("odom");       // Pose is relative to the odom frame
+    OdometryData.ChildFrameId = TEXT("base_link"); // Twist is relative to the base_link frame
+
+    // Pose (in Odom Frame) - Convert CM to M
+    const FVector WorldPositionCm = Pawn->GetActorLocation();
+    const FQuat WorldOrientationQuat = Pawn->GetActorQuat(); // Get actor orientation
+    const float CM_TO_M = 0.01f;
+
+    OdometryData.Pose.Pose.Position.X = WorldPositionCm.X * CM_TO_M;
+    OdometryData.Pose.Pose.Position.Y = WorldPositionCm.Y * CM_TO_M;
+    OdometryData.Pose.Pose.Position.Z = WorldPositionCm.Z * CM_TO_M;
+    OdometryData.Pose.Pose.Orientation = WorldOrientationQuat; // Use the world orientation
+
+    const FVector WorldLinearVelocityCmps = Pawn->GetVelocity(); // Get World Velocity
+    const FRotator WorldRotation = Pawn->GetActorRotation();          // Get World Rotation
+
+   const FVector LocalLinearVelocityCmps = WorldRotation.UnrotateVector(WorldLinearVelocityCmps);
+    const FVector AngularVelocityRadps = FVector::ZeroVector; // Angular velocity not available from generic pawn
+
+    // Populate Twist with LOCAL Linear Velocity (Convert CM/s to M/s)
+    OdometryData.Twist.Twist.Linear.X = LocalLinearVelocityCmps.X * CM_TO_M;
+    OdometryData.Twist.Twist.Linear.Y = LocalLinearVelocityCmps.Y * CM_TO_M;
+    OdometryData.Twist.Twist.Linear.Z = LocalLinearVelocityCmps.Z * CM_TO_M; // Make sure Z is included if needed
+
+    // Populate Twist with Angular Velocity (already local, rad/s)
+    OdometryData.Twist.Twist.Angular.X = AngularVelocityRadps.X;
+    OdometryData.Twist.Twist.Angular.Y = AngularVelocityRadps.Y;
+    OdometryData.Twist.Twist.Angular.Z = AngularVelocityRadps.Z;
+
+    // Set message data
+    if (UROS2OdomMsg* OdometryMsg = Cast<UROS2OdomMsg>(InMessage))
+    {
+        OdometryMsg->SetMsg(OdometryData);
+    }
+    else { UE_LOG(LogTemp, Error, TEXT("UpdateOdometryMessage: Failed cast to UROS2OdomMsg")); }
+}
+
+void AROS2Controller::InitializeImageCapture()
+{
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!Pawn || !SceneCapture)
+    {
+        UE_LOG(LogTemp, Error, TEXT("Missing required components for image capture!"));
+        return;
     }
 
-    void AROS2Controller::HandleVelocityCommand(const UROS2GenericMsg* InMsg)
+    // Find camera component generically
+    UCameraComponent* CameraComponent = Cast<UCameraComponent>(Pawn->GetComponentByClass(UCameraComponent::StaticClass()));
+    if (!CameraComponent)
     {
-
-        if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: InMsg is null")); return; }
-        const UROS2TwistMsg* TwistMsgWrapper = Cast<UROS2TwistMsg>(InMsg);
-        if (!TwistMsgWrapper) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: Invalid msg type")); return; }
-
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: Owning Pawn invalid")); return; }
-        UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
-        if (!IsValid(DroneController)) { UE_LOG(LogTemp, Warning, TEXT("HandleVelocityCommand: DroneController invalid")); return; }
-
-        FROSTwist TwistData;
-        TwistMsgWrapper->GetMsg(TwistData);
-
-        const float M_TO_CM = 100.f;
-        const float TargetLinearXVelocity_cms = TwistData.Linear.X * M_TO_CM;
-        const float TargetLinearYVelocity_cms = TwistData.Linear.Y * M_TO_CM; // Use Y if needed in future
-        const float TargetLinearZVelocity_cms = TwistData.Linear.Z * M_TO_CM; // Use Z if needed in future
-
-        FVector DesiredVelocityVector = FVector(TargetLinearXVelocity_cms, TargetLinearYVelocity_cms, TargetLinearZVelocity_cms);
-        const float TargetAngularZ_radps = TwistData.Angular.Z;
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Velocity command - Linear: %s, Angular Z: %.2f"), *DesiredVelocityVector.ToString(), TargetAngularZ_radps);
-        
-        // Send command to QuadPawn via interface (using CallFunctionByNameWithArguments)
-        FVector AngularVelocityVector = FVector(0.0f, 0.0f, TargetAngularZ_radps);
-        FString Command = FString::Printf(TEXT("SetExternalVelocityCommand (%s) (%s)"), 
-            *DesiredVelocityVector.ToString(), 
-            *AngularVelocityVector.ToString());
-        Pawn->CallFunctionByNameWithArguments(*Command, *GLog, nullptr, true);
-
+        UE_LOG(LogTemp, Warning, TEXT("No camera component found - image capture disabled"));
+        return;
     }
 
-    void AROS2Controller::HandleResetCommand(const UROS2GenericMsg* InMsg)
+    if (!SceneCapture->IsAttachedTo(CameraComponent))
     {
-        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Processing 'reset' command (received Empty message)..."));
+        SceneCapture->AttachToComponent(CameraComponent,
+            FAttachmentTransformRules::SnapToTargetIncludingScale);
+    }
+    SceneCapture->RegisterComponent();
+    SceneCapture->HiddenActors.Add(Pawn);
 
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleResetCommand: Owning Pawn invalid")); return; }
-        UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
-        if (!IsValid(DroneController)) { UE_LOG(LogTemp, Warning, TEXT("HandleResetCommand: DroneController invalid! Cannot reset.")); return; }
-
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Reset command received"));
-        // Send reset command to QuadPawn
-        Pawn->CallFunctionByNameWithArguments(TEXT("ResetDroneFromExternal"), *GLog, nullptr, true);
-        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Reset command processed"));
+    for (int32 i = 0; i < 2; ++i)
+    {
+        RenderTargets[i] = NewObject<UTextureRenderTarget2D>(this);
+        RenderTargets[i]->InitCustomFormat(
+            ImageResolution.X,
+            ImageResolution.Y,
+            PF_B8G8R8A8, 
+            true  
+        );
+        RenderTargets[i]->TargetGamma = 2.2f;
+        RenderTargets[i]->UpdateResourceImmediate(true);
     }
 
-    void AROS2Controller::UpdateGoalPositionMessage(UROS2GenericMsg* InMessage)
-    {
-        if (!InMessage) return;
+    SceneCapture->FOVAngle = CameraComponent->FieldOfView;
+    SceneCapture->ShowFlags.SetTonemapper(true);
+    SceneCapture->CaptureSource = SCS_FinalColorLDR;
+    SceneCapture->bCaptureEveryFrame = false;
+    SceneCapture->bAlwaysPersistRenderingState = true;
+}
 
-        FROSPoint GoalData;
-        // Goal position not available from generic system - use default
-        const FVector GoalLocation = FVector::ZeroVector;
-        
-        GoalData.X = GoalLocation.X;
-        GoalData.Y = GoalLocation.Y;
-        GoalData.Z = GoalLocation.Z;
-        
-        if(UROS2PointMsg* GoalMsg = Cast<UROS2PointMsg>(InMessage))
+void AROS2Controller::CaptureImage()
+{
+    if (!SceneCapture || bIsProcessingImage) return;
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!Pawn) return;
+
+    // Find camera component generically
+    UCameraComponent* CameraComponent = Cast<UCameraComponent>(Pawn->GetComponentByClass(UCameraComponent::StaticClass()));
+    if (!CameraComponent) return;
+
+    SceneCapture->SetWorldLocationAndRotation(
+        CameraComponent->GetComponentLocation(),
+        CameraComponent->GetComponentRotation()
+    );
+
+    const FVector CaptureLocation = CameraComponent->GetComponentLocation();
+    const FRotator CameraFullRotation = CameraComponent->GetComponentRotation();
+
+    const FRotator CaptureYawOnlyRotation = FRotator(0.0f, CameraFullRotation.Yaw, 0.0f);
+    SceneCapture->SetWorldLocationAndRotation(CaptureLocation, CaptureYawOnlyRotation);
+    
+    CurrentRenderTargetIndex = (CurrentRenderTargetIndex + 1) % 2;
+    UTextureRenderTarget2D* CurrentTarget = RenderTargets[CurrentRenderTargetIndex];
+    
+    SceneCapture->TextureTarget = CurrentTarget;
+    SceneCapture->CaptureScene();
+
+    FTextureRenderTargetResource* RTResource = CurrentTarget->GameThread_GetRenderTargetResource();
+    if (!RTResource) return;
+
+    bIsProcessingImage = true;
+    
+    ENQUEUE_RENDER_COMMAND(CaptureImageCommand)(
+        [this, RTResource](FRHICommandListImmediate& RHICmdList)
         {
-            GoalMsg->SetMsg(GoalData);
-        }
-        else { UE_LOG(LogTemp, Error, TEXT("UpdateGoalPositionMessage: Failed cast to UROS2PointMsg")); }
-    }
-
-    void AROS2Controller::UpdateCollisionMessage(UROS2GenericMsg* InMessage)
-    {
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!Pawn || !InMessage) return;
-        UROS2Float64Msg* Msg = Cast<UROS2Float64Msg>(InMessage);
-        if (!Msg) return;
-        FROSFloat64 CollisionData;
-        // Get collision state from QuadPawn interface
-        bool bCollisionState = false;
-        if (UFunction* CollisionFunc = Pawn->FindFunction(TEXT("GetDroneCollisionState")))
-        {
-            Pawn->ProcessEvent(CollisionFunc, &bCollisionState);
-        }
-        CollisionData.Data = bCollisionState ? 1.0 : 0.0;
-        Msg->SetMsg(CollisionData);
-    }
-
-    void AROS2Controller::UpdateOdometryMessage(UROS2GenericMsg* InMessage)
-    {
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!Pawn || !InMessage || !IsValid(OdometryPublisher)) return;
-        UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
-        if (!IsValid(DroneController)) return;
-
-        FROSOdom OdometryData;
-
-        // Header
-        FTimespan Time = FDateTime::UtcNow().GetTimeOfDay();
-        OdometryData.Header.Stamp.Sec = static_cast<int32>(Time.GetTotalSeconds());
-        OdometryData.Header.Stamp.Nanosec = static_cast<uint32>(Time.GetFractionNano());
-        OdometryData.Header.FrameId = TEXT("odom");       // Pose is relative to the odom frame
-        OdometryData.ChildFrameId = TEXT("base_link"); // Twist is relative to the base_link frame
-
-        // Pose (in Odom Frame) - Convert CM to M
-        const FVector WorldPositionCm = Pawn->GetActorLocation();
-        const FQuat WorldOrientationQuat = Pawn->GetActorQuat(); // Get actor orientation
-        const float CM_TO_M = 0.01f;
-
-        OdometryData.Pose.Pose.Position.X = WorldPositionCm.X * CM_TO_M;
-        OdometryData.Pose.Pose.Position.Y = WorldPositionCm.Y * CM_TO_M;
-        OdometryData.Pose.Pose.Position.Z = WorldPositionCm.Z * CM_TO_M;
-        OdometryData.Pose.Pose.Orientation = WorldOrientationQuat; // Use the world orientation
-
-        const FVector WorldLinearVelocityCmps = Pawn->GetVelocity(); // Get World Velocity
-        const FRotator WorldRotation = Pawn->GetActorRotation();          // Get World Rotation
-
-       const FVector LocalLinearVelocityCmps = WorldRotation.UnrotateVector(WorldLinearVelocityCmps);
-        const FVector AngularVelocityRadps = FVector::ZeroVector; // Angular velocity not available from generic pawn
-
-        // Populate Twist with LOCAL Linear Velocity (Convert CM/s to M/s)
-        OdometryData.Twist.Twist.Linear.X = LocalLinearVelocityCmps.X * CM_TO_M;
-        OdometryData.Twist.Twist.Linear.Y = LocalLinearVelocityCmps.Y * CM_TO_M;
-        OdometryData.Twist.Twist.Linear.Z = LocalLinearVelocityCmps.Z * CM_TO_M; // Make sure Z is included if needed
-
-        // Populate Twist with Angular Velocity (already local, rad/s)
-        OdometryData.Twist.Twist.Angular.X = AngularVelocityRadps.X;
-        OdometryData.Twist.Twist.Angular.Y = AngularVelocityRadps.Y;
-        OdometryData.Twist.Twist.Angular.Z = AngularVelocityRadps.Z;
-
-        // Set message data
-        if (UROS2OdomMsg* OdometryMsg = Cast<UROS2OdomMsg>(InMessage))
-        {
-            OdometryMsg->SetMsg(OdometryData);
-        }
-        else { UE_LOG(LogTemp, Error, TEXT("UpdateOdometryMessage: Failed cast to UROS2OdomMsg")); }
-    }
-
-    void AROS2Controller::InitializeImageCapture()
-    {
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!Pawn || !SceneCapture)
-        {
-            UE_LOG(LogTemp, Error, TEXT("Missing required components for image capture!"));
-            return;
-        }
-
-        // Find camera component generically
-        UCameraComponent* CameraComponent = Cast<UCameraComponent>(Pawn->GetComponentByClass(UCameraComponent::StaticClass()));
-        if (!CameraComponent)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("No camera component found - image capture disabled"));
-            return;
-        }
-
-        if (!SceneCapture->IsAttachedTo(CameraComponent))
-        {
-            SceneCapture->AttachToComponent(CameraComponent,
-                FAttachmentTransformRules::SnapToTargetIncludingScale);
-        }
-        SceneCapture->RegisterComponent();
-        SceneCapture->HiddenActors.Add(Pawn);
-
-        for (int32 i = 0; i < 2; ++i)
-        {
-            RenderTargets[i] = NewObject<UTextureRenderTarget2D>(this);
-            RenderTargets[i]->InitCustomFormat(
-                ImageResolution.X,
-                ImageResolution.Y,
-                PF_B8G8R8A8, 
-                true  
+            TArray<FColor> Pixels;
+            RHICmdList.ReadSurfaceData(
+                RTResource->GetRenderTargetTexture(),
+                FIntRect(0, 0, ImageResolution.X, ImageResolution.Y),
+                Pixels,
+                FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX)
             );
-            RenderTargets[i]->TargetGamma = 2.2f;
-            RenderTargets[i]->UpdateResourceImmediate(true);
-        }
 
-        SceneCapture->FOVAngle = CameraComponent->FieldOfView;
-        SceneCapture->ShowFlags.SetTonemapper(true);
-        SceneCapture->CaptureSource = SCS_FinalColorLDR;
-        SceneCapture->bCaptureEveryFrame = false;
-        SceneCapture->bAlwaysPersistRenderingState = true;
-    }
-
-    void AROS2Controller::CaptureImage()
-    {
-        if (!SceneCapture || bIsProcessingImage) return;
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!Pawn) return;
-
-        // Find camera component generically
-        UCameraComponent* CameraComponent = Cast<UCameraComponent>(Pawn->GetComponentByClass(UCameraComponent::StaticClass()));
-        if (!CameraComponent) return;
-
-        SceneCapture->SetWorldLocationAndRotation(
-            CameraComponent->GetComponentLocation(),
-            CameraComponent->GetComponentRotation()
-        );
-
-        const FVector CaptureLocation = CameraComponent->GetComponentLocation();
-        const FRotator CameraFullRotation = CameraComponent->GetComponentRotation();
-
-        const FRotator CaptureYawOnlyRotation = FRotator(0.0f, CameraFullRotation.Yaw, 0.0f);
-        SceneCapture->SetWorldLocationAndRotation(CaptureLocation, CaptureYawOnlyRotation);
-        
-        CurrentRenderTargetIndex = (CurrentRenderTargetIndex + 1) % 2;
-        UTextureRenderTarget2D* CurrentTarget = RenderTargets[CurrentRenderTargetIndex];
-        
-        SceneCapture->TextureTarget = CurrentTarget;
-        SceneCapture->CaptureScene();
-
-        FTextureRenderTargetResource* RTResource = CurrentTarget->GameThread_GetRenderTargetResource();
-        if (!RTResource) return;
-
-        bIsProcessingImage = true;
-        
-        ENQUEUE_RENDER_COMMAND(CaptureImageCommand)(
-            [this, RTResource](FRHICommandListImmediate& RHICmdList)
+            AsyncTask(ENamedThreads::GameThread, [this, Pixels]()
             {
-                TArray<FColor> Pixels;
-                RHICmdList.ReadSurfaceData(
-                    RTResource->GetRenderTargetTexture(),
-                    FIntRect(0, 0, ImageResolution.X, ImageResolution.Y),
-                    Pixels,
-                    FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX)
-                );
+                ProcessCapturedImage(Pixels);
+            });
+        }
+    );
 
-                AsyncTask(ENamedThreads::GameThread, [this, Pixels]()
-                {
-                    ProcessCapturedImage(Pixels);
-                });
-            }
-        );
+    
+}
 
-        
-    }
-
-    void AROS2Controller::ProcessCapturedImage(const TArray<FColor>& Pixels)
+void AROS2Controller::ProcessCapturedImage(const TArray<FColor>& Pixels)
+{
+    if (Pixels.Num() == 0)
     {
-        if (Pixels.Num() == 0)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Failed to capture image data"));
-            bIsProcessingImage = false;
-            return;
-        }
-
-        FROSImg ImageMsg;
-        ImageMsg.Height = ImageResolution.Y;
-        ImageMsg.Width = ImageResolution.X;
-        ImageMsg.Encoding = "bgr8";
-        ImageMsg.Step = ImageResolution.X * 3;
-        ImageMsg.Data.Reserve(Pixels.Num() * 3);
-
-        for (const FColor& Pixel : Pixels)
-        {
-            ImageMsg.Data.Add(Pixel.B);  
-            ImageMsg.Data.Add(Pixel.G);  
-            ImageMsg.Data.Add(Pixel.R);  
-        }
-
-        if (IsValid(ImagePublisher) && IsValid(ImagePublisher->TopicMessage))
-        {
-            if (UROS2ImgMsg* Msg = Cast<UROS2ImgMsg>(ImagePublisher->TopicMessage))
-            {
-                Msg->SetMsg(ImageMsg);
-                ImagePublisher->Publish();
-            }
-        }
-        else 
-        {
-            UE_LOG(LogTemp, Error, TEXT("ImagePublisher invalid: %d, Msg: %d"), 
-                IsValid(ImagePublisher), 
-                (ImagePublisher ? IsValid(ImagePublisher->TopicMessage) : false));
-        }
-
+        UE_LOG(LogTemp, Warning, TEXT("Failed to capture image data"));
         bIsProcessingImage = false;
+        return;
     }
 
-    void AROS2Controller::UpdateImageMessage(UROS2GenericMsg* InMessage)
-    {
-    }
-    // Accessor implementations for UI
-    FVector AROS2Controller::GetCurrentGoalPosition() const
-    {
-        // Goal position not available from generic system
-        return FVector::ZeroVector;
-    }
+    FROSImg ImageMsg;
+    ImageMsg.Height = ImageResolution.Y;
+    ImageMsg.Width = ImageResolution.X;
+    ImageMsg.Encoding = "bgr8";
+    ImageMsg.Step = ImageResolution.X * 3;
+    ImageMsg.Data.Reserve(Pixels.Num() * 3);
 
-    FString AROS2Controller::GetDroneID() const
+    for (const FColor& Pixel : Pixels)
     {
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        return Pawn ? Pawn->GetName() : FString(TEXT("Unknown"));
+        ImageMsg.Data.Add(Pixel.B);  
+        ImageMsg.Data.Add(Pixel.G);  
+        ImageMsg.Data.Add(Pixel.R);  
     }
 
-    void AROS2Controller::UpdateTFMessage(UROS2GenericMsg* InMsg)
+    if (IsValid(ImagePublisher) && IsValid(ImagePublisher->TopicMessage))
     {
-        // 1) Cast to the actual wrapper class name from ROS2TFMsg.h
-        auto* TfMsg = Cast<UROS2TFMsgMsg>(InMsg); // *** Use UROS2TFMsgMsg ***
-        if (!TfMsg) return;
-
-        APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-        if (!IsValid(Pawn)) return;
-
-        // 2) Build the ROS C-struct TransformStamped
-        geometry_msgs__msg__TransformStamped tf_stamped;
-        if (!geometry_msgs__msg__TransformStamped__init(&tf_stamped)) {
-            UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to init TransformStamped C-struct"));
-            return;
-        }
-
-        // Auto-cleanup for the C-struct
-        struct FScopeFiniGuard {
-            geometry_msgs__msg__TransformStamped* Ptr;
-            FScopeFiniGuard(geometry_msgs__msg__TransformStamped* InPtr) : Ptr(InPtr) {}
-            ~FScopeFiniGuard() { if(Ptr) geometry_msgs__msg__TransformStamped__fini(Ptr); }
-        } TfGuard(&tf_stamped);
-
-        // Populate Header
-        FTimespan Time = FDateTime::UtcNow().GetTimeOfDay();
-        tf_stamped.header.stamp.sec = static_cast<int32>(Time.GetTotalSeconds());
-        tf_stamped.header.stamp.nanosec = static_cast<uint32>(Time.GetFractionNano());
-        if (!rosidl_runtime_c__String__assign(&tf_stamped.header.frame_id, TCHAR_TO_UTF8(*FString("odom")))) {
-           UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to assign header.frame_id")); return;
-        }
-        if (!rosidl_runtime_c__String__assign(&tf_stamped.child_frame_id, TCHAR_TO_UTF8(*FString("base_link")))) {
-           UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to assign child_frame_id")); return;
-        }
-
-        // Populate Transform using Utility Function
-        tf_stamped.transform = UROS2Utils::TransformUEToROS(Pawn->GetActorTransform());
-
-        // 3) Convert C-struct into the UE FStruct wrapper using the CONFIRMED method
-        FROSTFStamped ue_stamp;
-        ue_stamp.SetFromROS2(tf_stamped); // This method name is confirmed from ROS2TFStamped.h
-
-        // (Fini will be called by TfGuard)
-
-        // 4) Prepare the main message FStruct
-        FROSTFMsg ue_msg;
-        ue_msg.Transforms.Add(ue_stamp);
-
-        // 5) Call SetMsg on the correct wrapper object type
-        // If the "Cannot convert FROSTFMsg to FROSTF" error still occurs HERE,
-        // it indicates a deeper issue possibly within RCLUE's handling of UROS2TFMsgMsg.
-        TfMsg->SetMsg(ue_msg);
-    }
-    void AROS2Controller::HandleGoalPose(const UROS2GenericMsg* InMsg)
-    {
-        auto* PoseWrap = Cast<UROS2PoseStampedMsg>(InMsg);
-        if (!PoseWrap) return;
-
-        // unwrap the ROS message
-        FROSPoseStamped rosPose;
-        PoseWrap->GetMsg(rosPose);
-
-        // directly grab the UE FVector (no manual .X/.Y/.Z needed)
-        FVector goal_loc = rosPose.Pose.Position;
-
-        UE_LOG(LogTemp, Log, TEXT("New ROS goal at %s"), *goal_loc.ToString());
-
-        // feed it to navigation component if available
-        if (APawn* Pawn = Cast<APawn>(GetAttachParentActor()))
+        if (UROS2ImgMsg* Msg = Cast<UROS2ImgMsg>(ImagePublisher->TopicMessage))
         {
-            if (UActorComponent* NavComponent = Pawn->GetComponentByClass(UActorComponent::StaticClass()))
-            {
-                UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Navigation component found, setting destination"));
-            }
+            Msg->SetMsg(ImageMsg);
+            ImagePublisher->Publish();
         }
     }
+    else 
+    {
+        UE_LOG(LogTemp, Error, TEXT("ImagePublisher invalid: %d, Msg: %d"), 
+            IsValid(ImagePublisher), 
+            (ImagePublisher ? IsValid(ImagePublisher->TopicMessage) : false));
+    }
+
+    bIsProcessingImage = false;
+}
+
+void AROS2Controller::UpdateImageMessage(UROS2GenericMsg* InMessage)
+{
+}
+// Accessor implementations for UI
+FVector AROS2Controller::GetCurrentGoalPosition() const
+{
+    // Goal position not available from generic system
+    return FVector::ZeroVector;
+}
+
+FString AROS2Controller::GetDroneID() const
+{
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    return Pawn ? Pawn->GetName() : FString(TEXT("Unknown"));
+}
+
+void AROS2Controller::UpdateTFMessage(UROS2GenericMsg* InMsg)
+{
+    // 1) Cast to the actual wrapper class name from ROS2TFMsg.h
+    auto* TfMsg = Cast<UROS2TFMsgMsg>(InMsg); // *** Use UROS2TFMsgMsg ***
+    if (!TfMsg) return;
+
+    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
+    if (!IsValid(Pawn)) return;
+
+    // 2) Build the ROS C-struct TransformStamped
+    geometry_msgs__msg__TransformStamped tf_stamped;
+    if (!geometry_msgs__msg__TransformStamped__init(&tf_stamped)) {
+        UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to init TransformStamped C-struct"));
+        return;
+    }
+
+    // Auto-cleanup for the C-struct
+    struct FScopeFiniGuard {
+        geometry_msgs__msg__TransformStamped* Ptr;
+        FScopeFiniGuard(geometry_msgs__msg__TransformStamped* InPtr) : Ptr(InPtr) {}
+        ~FScopeFiniGuard() { if(Ptr) geometry_msgs__msg__TransformStamped__fini(Ptr); }
+    } TfGuard(&tf_stamped);
+
+    // Populate Header
+    FTimespan Time = FDateTime::UtcNow().GetTimeOfDay();
+    tf_stamped.header.stamp.sec = static_cast<int32>(Time.GetTotalSeconds());
+    tf_stamped.header.stamp.nanosec = static_cast<uint32>(Time.GetFractionNano());
+    if (!rosidl_runtime_c__String__assign(&tf_stamped.header.frame_id, TCHAR_TO_UTF8(*FString("odom")))) {
+       UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to assign header.frame_id")); return;
+    }
+    if (!rosidl_runtime_c__String__assign(&tf_stamped.child_frame_id, TCHAR_TO_UTF8(*FString("base_link")))) {
+       UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to assign child_frame_id")); return;
+    }
+
+    // Populate Transform using Utility Function
+    tf_stamped.transform = UROS2Utils::TransformUEToROS(Pawn->GetActorTransform());
+
+    // 3) Convert C-struct into the UE FStruct wrapper using the CONFIRMED method
+    FROSTFStamped ue_stamp;
+    ue_stamp.SetFromROS2(tf_stamped); // This method name is confirmed from ROS2TFStamped.h
+
+    // (Fini will be called by TfGuard)
+
+    // 4) Prepare the main message FStruct
+    FROSTFMsg ue_msg;
+    ue_msg.Transforms.Add(ue_stamp);
+
+    // 5) Call SetMsg on the correct wrapper object type
+    // If the "Cannot convert FROSTFMsg to FROSTF" error still occurs HERE,
+    // it indicates a deeper issue possibly within RCLUE's handling of UROS2TFMsgMsg.
+    TfMsg->SetMsg(ue_msg);
+}
+void AROS2Controller::HandleGoalPose(const UROS2GenericMsg* InMsg)
+{
+    auto* PoseWrap = Cast<UROS2PoseStampedMsg>(InMsg);
+    if (!PoseWrap) return;
+
+    // unwrap the ROS message
+    FROSPoseStamped rosPose;
+    PoseWrap->GetMsg(rosPose);
+
+    // directly grab the UE FVector (no manual .X/.Y/.Z needed)
+    FVector goal_loc = rosPose.Pose.Position;
+
+    UE_LOG(LogTemp, Log, TEXT("New ROS goal at %s"), *goal_loc.ToString());
+
+    // feed it to navigation component if available
+    if (APawn* Pawn = Cast<APawn>(GetAttachParentActor()))
+    {
+        if (UActorComponent* NavComponent = Pawn->GetComponentByClass(UActorComponent::StaticClass()))
+        {
+            UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Navigation component found, setting destination"));
+        }
+    }
+}

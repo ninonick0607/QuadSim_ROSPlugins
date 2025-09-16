@@ -86,7 +86,7 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
     float ImageFrequencyHz = 10.f; // Reduce cost; image encode can exceed 66ms
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
-    FIntPoint ImageResolution = FIntPoint(96, 96); // Lower default to reduce per-frame work
+    FIntPoint ImageResolution = FIntPoint(128, 128); // Match receiver expectation (128x128x3)
 
     // --- Subscriber Topics ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
