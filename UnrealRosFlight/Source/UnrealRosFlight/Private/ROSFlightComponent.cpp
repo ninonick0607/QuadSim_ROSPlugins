@@ -18,6 +18,13 @@
 #include "Interfaces/IPv4/IPv4Address.h"
 #include "SocketSubsystem.h"
 
+// QuadPawn + RobotCore sensors
+#include "Pawns/QuadPawn.h"
+#include "Sensors/SensorManagerComponent.h"
+#include "Sensors/IMUSensor.h"
+#include "Sensors/GPSSensor.h"
+#include "Sensors/BaroSensor.h"
+
 DEFINE_LOG_CATEGORY_STATIC(LogROSFlight, Log, All);
 
 UROSFlightComponent::UROSFlightComponent()
@@ -215,68 +222,37 @@ void UROSFlightComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 
 void UROSFlightComponent::PublishIMU()
 {
-    if (!ImuPub || !Body) return;
+    if (!ImuPub) return;
+
+    // Use RobotCore IMU sensor via QuadPawn
+    AQuadPawn* QuadPawn = Cast<AQuadPawn>(GetOwner());
+    if (!QuadPawn || !QuadPawn->SensorManager || !QuadPawn->SensorManager->IMU) return;
 
     const float Dt = GetWorld()->GetDeltaSeconds();
-    
-    // Get current state
-    const FQuat WorldQuat = GetOwner()->GetActorQuat();
-    const FVector WorldLinVel = Body->GetPhysicsLinearVelocity();
-    const FVector WorldAngVel = Body->GetPhysicsAngularVelocityInRadians();
 
-    // Convert to ROS coordinate frame
+    const FRotator AttDeg = QuadPawn->SensorManager->IMU->GetLastAttitude();
+    const FQuat WorldQuat = AttDeg.Quaternion();
+    const FVector GyroBodyRad = QuadPawn->SensorManager->IMU->GetLastGyroscope();
+    const FVector AccelBody = QuadPawn->SensorManager->IMU->GetLastAccelerometer();
+
     const FQuat RosQuat = UnrealToRos(WorldQuat);
-    const FVector RosAngVelBody = UnrealToRos(WorldQuat.UnrotateVector(WorldAngVel));
+    const FVector RosAngVelBody = UnrealToRos(GyroBodyRad);
+    const FVector RosLinAccelBody = UnrealToRos(AccelBody);
 
-    // Compute acceleration
-    FVector WorldAccel = FVector::ZeroVector;
-    if (!bFirstSample) 
-    {
-        WorldAccel = (WorldLinVel - PrevLinVel) / Dt;
-    }
-    PrevLinVel = WorldLinVel;
-    bFirstSample = false;
-
-    const FVector RosLinAccelBody = UnrealToRos(WorldQuat.UnrotateVector(WorldAccel));
-
-    // Add bias and noise
+    // Optional sensor noise model retained if needed
     StepGaussMarkov(BiasGyro, NoiseSigmaGyro, Dt);
     StepGaussMarkov(BiasAccel, NoiseSigmaAccel, Dt);
 
-    const FVector GyroMeas = RosAngVelBody + BiasGyro + FVector(
-        NoiseSigmaGyro.X * SampleNormal(),
-        NoiseSigmaGyro.Y * SampleNormal(),
-        NoiseSigmaGyro.Z * SampleNormal()
-    );
+    const FVector GyroMeas = RosAngVelBody + BiasGyro;
+    const FVector AccelMeas = RosLinAccelBody + BiasAccel;
 
-    const FVector AccelMeas = RosLinAccelBody + BiasAccel + FVector(
-        NoiseSigmaAccel.X * SampleNormal(),
-        NoiseSigmaAccel.Y * SampleNormal(),
-        NoiseSigmaAccel.Z * SampleNormal()
-    );
-
-    // Create and publish IMU message
     if (auto* ImuMsg = Cast<UROS2ImuMsg>(ImuPub->TopicMessage))
     {
         FROSImu ImuData;
         ImuData.Header.FrameId = TEXT("base_link");
-        
-        // Set orientation
-        ImuData.Orientation.X = RosQuat.X;
-        ImuData.Orientation.Y = RosQuat.Y;
-        ImuData.Orientation.Z = RosQuat.Z;
-        ImuData.Orientation.W = RosQuat.W;
-        
-        // Set angular velocity
-        ImuData.AngularVelocity.X = GyroMeas.X;
-        ImuData.AngularVelocity.Y = GyroMeas.Y;
-        ImuData.AngularVelocity.Z = GyroMeas.Z;
-        
-        // Set linear acceleration
-        ImuData.LinearAcceleration.X = AccelMeas.X;
-        ImuData.LinearAcceleration.Y = AccelMeas.Y;
-        ImuData.LinearAcceleration.Z = AccelMeas.Z;
-        
+        ImuData.Orientation = RosQuat;
+        ImuData.AngularVelocity = GyroMeas;
+        ImuData.LinearAcceleration = AccelMeas;
         ImuMsg->SetMsg(ImuData);
         ImuPub->Publish();
     }
@@ -284,48 +260,41 @@ void UROSFlightComponent::PublishIMU()
 
 void UROSFlightComponent::PublishTruthState()
 {
-    if (!SimStatePub || !Body) return;
+    if (!SimStatePub) return;
 
-    // Get current aircraft state
-    const FVector Position = GetOwner()->GetActorLocation();
-    const FQuat Orientation = GetOwner()->GetActorQuat();
-    const FVector LinearVel = Body->GetPhysicsLinearVelocity();
-    const FVector AngularVel = Body->GetPhysicsAngularVelocityInRadians();
+    AQuadPawn* QuadPawn = Cast<AQuadPawn>(GetOwner());
+    if (!QuadPawn || !QuadPawn->SensorManager) return;
 
-    // Convert to ROS coordinates (including cm to m conversion)
-    const FVector RosPosition = UnrealToRos(Position) / 100.0f;
-    const FQuat RosOrientation = UnrealToRos(Orientation);
-    const FVector RosLinearVel = UnrealToRos(LinearVel) / 100.0f;
-    const FVector RosAngularVel = UnrealToRos(AngularVel);
+    UGPSSensor* GPS = QuadPawn->SensorManager->GPS;
+    UIMUSensor* IMU = QuadPawn->SensorManager->IMU;
+    UBaroSensor* Baro = QuadPawn->SensorManager->Barometer;
+    if (!GPS || !IMU) return;
 
-    // Create and publish truth state message
+    const FVector GPSMeters = GPS->GetLastGPS();
+    float AltMeters = GPSMeters.Z;
+    if (Baro) AltMeters = Baro->GetEstimatedAltitude();
+
+    const FRotator AttDeg = IMU->GetLastAttitude();
+    const FQuat UEQuat = AttDeg.Quaternion();
+    const FVector LocalVelMps = IMU->GetLastVelocity();
+    const FVector BodyAngRad = IMU->GetLastGyroscope();
+
+    const FVector UEPosCm(GPSMeters.X*100.f, GPSMeters.Y*100.f, AltMeters*100.f);
+    const FVector RosPosition = UnrealToRos(UEPosCm) / 100.0f;
+    const FQuat RosOrientation = UnrealToRos(UEQuat);
+
     if (auto* TruthMsg = Cast<UROS2SimStateMsg>(SimStatePub->TopicMessage))
     {
         FROSSimState TruthData;
         TruthData.Header.FrameId = TEXT("world");
-        
-        // Set pose
-        TruthData.Pose.Position.X = RosPosition.X;
-        TruthData.Pose.Position.Y = RosPosition.Y;
-        TruthData.Pose.Position.Z = RosPosition.Z;
-        
-        TruthData.Pose.Orientation.X = RosOrientation.X;
-        TruthData.Pose.Orientation.Y = RosOrientation.Y;
-        TruthData.Pose.Orientation.Z = RosOrientation.Z;
-        TruthData.Pose.Orientation.W = RosOrientation.W;
-        
-        // Set twist (in body frame)
-        const FVector BodyLinearVel = Orientation.UnrotateVector(LinearVel) / 100.0f;
-        const FVector BodyAngularVel = Orientation.UnrotateVector(AngularVel);
-        
-        TruthData.Twist.Linear.X = UnrealToRos(BodyLinearVel).X;
-        TruthData.Twist.Linear.Y = UnrealToRos(BodyLinearVel).Y;
-        TruthData.Twist.Linear.Z = UnrealToRos(BodyLinearVel).Z;
-        
-        TruthData.Twist.Angular.X = UnrealToRos(BodyAngularVel).X;
-        TruthData.Twist.Angular.Y = UnrealToRos(BodyAngularVel).Y;
-        TruthData.Twist.Angular.Z = UnrealToRos(BodyAngularVel).Z;
-        
+        TruthData.Pose.Position = RosPosition;
+        TruthData.Pose.Orientation = RosOrientation;
+
+        const FVector RosBodyLin = UnrealToRos(LocalVelMps);
+        const FVector RosBodyAng = UnrealToRos(BodyAngRad);
+        TruthData.Twist.Linear = RosBodyLin;
+        TruthData.Twist.Angular = RosBodyAng;
+
         TruthMsg->SetMsg(TruthData);
         SimStatePub->Publish();
     }

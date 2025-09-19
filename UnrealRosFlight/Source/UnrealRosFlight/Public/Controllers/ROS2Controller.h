@@ -23,6 +23,8 @@
 #include "Msgs/ROS2PoseStamped.h"     
 #include "Msgs/ROS2PointStamped.h"    
 #include "Msgs/ROS2Quat.h"            
+// GPS fix message
+#include "Msgs/ROS2NavSatFix.h"
 
 // --- Utilities ---
 #include "rclcUtilities.h"
@@ -86,7 +88,12 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
     float ImageFrequencyHz = 10.f; // Reduce cost; image encode can exceed 66ms
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
-    FIntPoint ImageResolution = FIntPoint(128, 128); // Match receiver expectation (128x128x3)
+    FIntPoint ImageResolution = FIntPoint(256, 256); // Increased default resolution
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|GPS")
+    FString GpsFixTopicName = TEXT("/gps/fix");
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|GPS")
+    float GpsFixFrequencyHz = 10.f;
 
     // --- Subscriber Topics ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
@@ -131,6 +138,8 @@ private:
     void UpdateCollisionMessage(UROS2GenericMsg* InMessage);
     UFUNCTION()
     void UpdateTFMessage(UROS2GenericMsg* InMsg);
+    UFUNCTION()
+    void UpdateGpsFixMessage(UROS2GenericMsg* InMsg);
 
     // --- ROS Subscription Handlers ---
     UFUNCTION()
@@ -160,6 +169,8 @@ private:
     UROS2Publisher* GoalPosition; // Publishes internal goal
     UPROPERTY()
     UROS2Publisher* TfPublisher;
+    UPROPERTY()
+    UROS2Publisher* GpsFixPublisher;
 
     UPROPERTY()
     UROS2Subscriber* ObstacleSubscriber;

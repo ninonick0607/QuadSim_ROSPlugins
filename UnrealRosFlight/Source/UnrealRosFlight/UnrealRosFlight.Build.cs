@@ -19,11 +19,18 @@ public class UnrealRosFlight : ModuleRules
 		string ProjectPluginsDirectory = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../../")); 
 		string QuadSimPluginPath = Path.Combine(ProjectPluginsDirectory, "QuadSimPlugin");
 		string QuadSimCorePublicPath = Path.Combine(QuadSimPluginPath, "Source", "QuadSimCore", "Public");
+		string RobotCorePublicPath = Path.Combine(QuadSimPluginPath, "Source", "RobotCore", "Public");
 		
 		if (Directory.Exists(QuadSimCorePublicPath))
 		{
 			PublicDependencyModuleNames.Add("QuadSimCore");
 			PublicIncludePaths.Add(QuadSimCorePublicPath);
+		}
+
+		if (Directory.Exists(RobotCorePublicPath))
+		{
+			PublicDependencyModuleNames.Add("RobotCore");
+			PublicIncludePaths.Add(RobotCorePublicPath);
 		}
 
 		string RosRoot     = Path.Combine(ModuleDirectory, "..", "..", "ThirdParty", "ros");
