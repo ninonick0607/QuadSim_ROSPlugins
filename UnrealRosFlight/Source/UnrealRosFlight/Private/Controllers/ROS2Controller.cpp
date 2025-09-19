@@ -225,26 +225,6 @@ void AROS2Controller::HandleImuData(const UROS2GenericMsg* InMsg)
     
 }
 
-void AROS2Controller::SetupObstacleManager()
-{
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: No world to find ObstacleManager"));
-        return;
-    }
-    AActor* Found = UGameplayStatics::GetActorOfClass(World, AObstacleManager::StaticClass());
-    if (Found)
-    {
-        ObstacleManagerInstance = Found;
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Found ObstacleManager %s"), *Found->GetName());
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: ObstacleManager not found in world"));
-    }
-}
-
 void AROS2Controller::HandleHoverCommand(const UROS2GenericMsg* InMsg)
 {
     if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleHoverMessage: InMsg is null")); return; }
@@ -307,6 +287,26 @@ void AROS2Controller::HandleAttitudeEuler(const UROS2GenericMsg* InMsg)
     }
 }
 
+void AROS2Controller::SetupObstacleManager()
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: No world to find ObstacleManager"));
+        return;
+    }
+    AActor* Found = UGameplayStatics::GetActorOfClass(World, AObstacleManager::StaticClass());
+    if (Found)
+    {
+        ObstacleManagerInstance = Found;
+        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Found ObstacleManager %s"), *Found->GetName());
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: ObstacleManager not found in world"));
+    }
+}
+
 void AROS2Controller::HandleObstacleMessage(const UROS2GenericMsg* InMsg)
 {
     if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: InMsg is null")); return; }
@@ -332,7 +332,6 @@ void AROS2Controller::HandleObstacleMessage(const UROS2GenericMsg* InMsg)
         UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: ObstacleManager not available; cannot spawn obstacles"));
     }
     UE_LOG(LogTemp, Log, TEXT("Received obstacle count: %d"), ObstacleCount);
-    // Obstacle creation not available from generic system - logged only
     
 }
 
