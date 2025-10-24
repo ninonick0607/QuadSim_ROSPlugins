@@ -1,260 +1,418 @@
+#include "Controllers/ROS2Controller.h"
 
-    #include "Controllers/ROS2Controller.h"
+// --- Standard Includes ---
+#include "Kismet/GameplayStatics.h"
+#include "Async/Async.h"
+#include "Components/SceneCaptureComponent2D.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "TimerManager.h"
+#include "RHICommandList.h"
+#include "RenderingThread.h"
+#include "Camera/CameraComponent.h"
+#include "Misc/App.h"
+#include "Core/SimulationManager.h"
+#include "Core/TimeController.h"
+#include "EngineUtils.h"      
 
-    // --- Standard Includes ---
-    #include "Kismet/GameplayStatics.h"
-    #include "Async/Async.h"
-    #include "Components/SceneCaptureComponent2D.h"
-    #include "Engine/TextureRenderTarget2D.h"
-    #include "TimerManager.h"
-    #include "RHICommandList.h"
-    #include "RenderingThread.h"
-    #include "Camera/CameraComponent.h"
-    #include "Misc/App.h"
+// --- ROS 2 Includes ---
+#include "ROS2NodeComponent.h"
+#include "ROS2Publisher.h"
+#include "ROS2Subscriber.h"
+#include "rclcUtilities.h"
 
-    // --- ROS 2 Includes ---
-    #include "ROS2NodeComponent.h"
-    #include "ROS2Publisher.h"
-    #include "ROS2Subscriber.h"
-    #include "rclcUtilities.h"
+#include "Msgs/ROS2GenericMsg.h"
+#include "Msgs/ROS2TFMsg.h"        
+#include "Msgs/ROS2TFStamped.h"    
+#include "Msgs/ROS2PoseStamped.h"  
+#include "Msgs/ROS2Odom.h"
+#include "Msgs/ROS2Point.h"        
+#include "Msgs/ROS2Img.h"
+#include "Msgs/ROS2Float64.h"
+#include "Msgs/ROS2Twist.h"
+#include "Msgs/ROS2Str.h"
+#include "Msgs/ROS2Empty.h"
+#include "Msgs/ROS2TF.h"          
+#include "Msgs/ROS2Header.h"      
+#include "Msgs/ROS2Time.h"        
+#include "Msgs/ROS2Pose.h"        
+#include "Msgs/ROS2Quat.h"        
 
-    #include "Msgs/ROS2GenericMsg.h"
-    #include "Msgs/ROS2TFMsg.h"        
-    #include "Msgs/ROS2TFStamped.h"    
-    #include "Msgs/ROS2PoseStamped.h"  
-    #include "Msgs/ROS2Odom.h"
-    #include "Msgs/ROS2Point.h"        
-    #include "Msgs/ROS2Img.h"
-    #include "Msgs/ROS2Float64.h"
-    #include "Msgs/ROS2Twist.h"
-    #include "Msgs/ROS2Str.h"
-    #include "Msgs/ROS2Empty.h"
-    #include "Msgs/ROS2TF.h"          
-    #include "Msgs/ROS2Header.h"      
-    #include "Msgs/ROS2Time.h"        
-    #include "Msgs/ROS2Pose.h"        
-    #include "Msgs/ROS2Quat.h"        
+// C-Struct Headers (Needed for utility function inputs & low-level assignment)
+#include "geometry_msgs/msg/transform_stamped.h"
+#include "geometry_msgs/msg/point.h"
+#include "geometry_msgs/msg/quaternion.h"
+#include "rosidl_runtime_c/string_functions.h" // For string assign/init/fini
 
-    // C-Struct Headers (Needed for utility function inputs & low-level assignment)
-    #include "geometry_msgs/msg/transform_stamped.h"
-    #include "geometry_msgs/msg/point.h"
-    #include "geometry_msgs/msg/quaternion.h"
-    #include "rosidl_runtime_c/string_functions.h" // For string assign/init/fini
-
-    // --- Generic Unreal Includes (no QuadSimCore dependencies) ---
-    #include "GameFramework/Pawn.h"
-    #include "Components/ActorComponent.h"
-    #include "Msgs/ROS2Vec3Stamped.h"
-
-    
-    // Quad controller definition
-    #include "Controllers/QuadDroneController.h"
-    // Obstacle manager from QuadSimCore
-    #include "Utility/ObstacleManager.h"
-    // QuadPawn + RobotCore sensors
-    #include "Pawns/QuadPawn.h"
-    #include "Sensors/SensorManagerComponent.h"
-    #include "Sensors/GPSSensor.h"
-    #include "Sensors/IMUSensor.h"
-    #include "Sensors/BaroSensor.h"
+// --- Generic Unreal Includes (no QuadSimCore dependencies) ---
+#include "GameFramework/Pawn.h"
+#include "Components/ActorComponent.h"
+#include "Msgs/ROS2Vec3Stamped.h"
 
 
+// Quad controller definition
+#include "Controllers/QuadDroneController.h"
+// Obstacle manager from QuadSimCore
+#include "Utility/ObstacleManager.h"
+// QuadPawn + RobotCore sensors
+#include "Msgs/ROS2Clock.h"
+#include "Msgs/ROS2TwistStamped.h"
+#include "Pawns/QuadPawn.h"
+#include "ROS2Service.h"
+#include "Sensors/BaroSensor.h"
+#include "Sensors/GPSSensor.h"
+#include "Sensors/IMUSensor.h"
+#include "Sensors/SensorManagerComponent.h"
+#include "Srvs/ROS2SetBool.h"
+#include "Srvs/ROS2Trigger.h"
 
 AROS2Controller::AROS2Controller()
-    {
-        PrimaryActorTick.bCanEverTick = false;
-        Node = CreateDefaultSubobject<UROS2NodeComponent>(TEXT("ROS2NodeComponent"));
-        SceneCapture = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("SceneCapture"));
-        RenderTargets.SetNum(2);
+{
+    PrimaryActorTick.bCanEverTick = false;
+    Node = CreateDefaultSubobject<UROS2NodeComponent>(TEXT("ROS2NodeComponent"));
 }
 
 void AROS2Controller::BeginPlay()
 {
     Super::BeginPlay();
 
-    // --- Pawn Validation ---
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!IsValid(Pawn))
-    {
-        UE_LOG(LogTemp, Error, TEXT("AROS2Controller::BeginPlay - Owning Pawn not found! Aborting."));
-        return;
-    }
+    if (bNodeStarted) { return; }
+    bNodeStarted = true;
     
-    // Check for camera component for image capture
-    UActorComponent* CameraComponent = Pawn->GetComponentByClass(UCameraComponent::StaticClass());
-    bool bCanCaptureImages = IsValid(CameraComponent);
-    if (!bCanCaptureImages)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller::BeginPlay - No camera component found. Image capture will be disabled."));
-    }
+    FPlatformMisc::SetEnvironmentVar(TEXT("ROS_DOMAIN_ID"), TEXT("0"));
+    FPlatformMisc::SetEnvironmentVar(TEXT("RMW_IMPLEMENTATION"), TEXT("rmw_cyclonedds_cpp"));
 
-    // --- Node Initialization ---
-    FString UniqueNodeName = NodeName;
-    if (Pawn) UniqueNodeName = NodeName + TEXT("_") + Pawn->GetFName().ToString();
-    UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Initializing ROS2 Node '%s' in namespace '%s'"), *UniqueNodeName, *Namespace);
-    Node->Name = UniqueNodeName;
-    Node->Namespace = Namespace;
+    UE_LOG(LogTemp, Warning, TEXT("ROS_DOMAIN_ID=%s, RMW=%s"),
+        *FString(FPlatformMisc::GetEnvironmentVariable(TEXT("ROS_DOMAIN_ID"))),
+        *FString(FPlatformMisc::GetEnvironmentVariable(TEXT("RMW_IMPLEMENTATION"))));
+    
+    // -- Node init --
+    Node = Node ? Node : CreateDefaultSubobject<UROS2NodeComponent>(TEXT("ROS2Node"));
+    Node->Name = TEXT("quadsim_node");
+    Node->Namespace = TEXT(""); // flat topics exactly as specified
     Node->Init();
 
-    // Helper: compute a frame-safe frequency based on fixed delta time (adds headroom and quantizes to whole frames)
-    auto ComputeSafeHz = [](float DesiredHz) -> float
+    if (UWorld* W = GetWorld())
     {
-        const float Step = FApp::GetFixedDeltaTime(); // 0 if unset; otherwise fixed tick interval
-        if (Step > 0.f && DesiredHz > 0.f)
+        if (AActor* A = UGameplayStatics::GetActorOfClass(W, ASimulationManager::StaticClass()))
         {
-            const float MaxHz = 1.f / Step;      // engine tick cap
-            const float SafeMax = MaxHz * 0.9f;  // 10% headroom to avoid timer underruns
-            const float Clamped = FMath::Min(DesiredHz, SafeMax);
-    
-            // Quantize to an integer number of frames to avoid impossible deadlines (align timer to Tick multiples)
-            const float Period = 1.f / Clamped;
-            const int32 FramesPerPeriod = FMath::Max(1, FMath::RoundToInt(Period / Step));
-            const float QuantizedPeriod = FramesPerPeriod * Step;
-            const float QuantizedHz = 1.f / QuantizedPeriod;
-            return QuantizedHz;
+            SimManager = Cast<ASimulationManager>(A);
+            if (!TimeController && SimManager.IsValid())
+            {
+                TimeController = SimManager->GetTimeController();
+                UE_LOG(LogTemp, Display, TEXT("ROS2Controller: Bound TimeController (%s)"),
+                    IsValid(TimeController) ? TEXT("OK") : TEXT("null"));
+            }
         }
-        return DesiredHz;
-    };
-    
-    // Precompute safe rates
-    const float OdomHzSafe = ComputeSafeHz(OdometryFrequencyHz);
-    const float GoalHzSafe = ComputeSafeHz(GoalFrequenzyHz);
-    const float ImgHzSafe  = ComputeSafeHz(ImageFrequencyHz);
-    const float CollHzSafe = ComputeSafeHz(CollisionFrequencyHz);
-    const float TFHzSafe   = ComputeSafeHz(TFFrequencyHz);
-    const float GpsHzSafe  = ComputeSafeHz(GpsFixFrequencyHz);
-    
-    UE_LOG(LogTemp, Log, TEXT("ROS2Controller rates (desired -> effective): Odom %.1f->%.1f Hz, TF %.1f->%.1f Hz, Image %.1f->%.1f Hz, Collision %.1f->%.1f Hz, Goal %.1f->%.1f Hz. Step=%.4fs"),OdometryFrequencyHz, OdomHzSafe,TFFrequencyHz, TFHzSafe,ImageFrequencyHz, ImgHzSafe,CollisionFrequencyHz, CollHzSafe,GoalFrequenzyHz, GoalHzSafe,FApp::GetFixedDeltaTime());
-    
-    // --- Setup Publishers ---
-    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *OdometryTopicName);
-    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, OdometryTopicName, UROS2Publisher::StaticClass(), UROS2OdomMsg::StaticClass(), OdomHzSafe, &AROS2Controller::UpdateOdometryMessage, UROS2QoS::Default, OdometryPublisher);
-    
-    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *PositionGoalTopicName);
-    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, PositionGoalTopicName, UROS2Publisher::StaticClass(), UROS2PointMsg::StaticClass(), GoalHzSafe, &AROS2Controller::UpdateGoalPositionMessage, UROS2QoS::Default, GoalPosition);
-    
-    if (bCanCaptureImages) {
-        UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *ImageTopicName);
-        ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, ImageTopicName, UROS2Publisher::StaticClass(), UROS2ImgMsg::StaticClass(), ImgHzSafe, &AROS2Controller::UpdateImageMessage, UROS2QoS::SensorData, ImagePublisher);
     }
-    
-    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *CollisionTopicName);
-    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, CollisionTopicName, UROS2Publisher::StaticClass(), UROS2Float64Msg::StaticClass(), CollHzSafe, &AROS2Controller::UpdateCollisionMessage, UROS2QoS::Default, CollisionPublisher);
-    
-        // TF Publisher (**USING CORRECT CLASS NAME**)
-    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *TFTopicName);
-    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
-    Node, this, TFTopicName, UROS2Publisher::StaticClass(),
-    UROS2TFMsgMsg::StaticClass(),
-    TFHzSafe, &AROS2Controller::UpdateTFMessage, UROS2QoS::DynamicBroadcaster, TfPublisher);
 
-    // GPS Fix publisher (NavSatFix)
-    UE_LOG(LogTemp, Log, TEXT("Setting up Publisher: %s"), *GpsFixTopicName);
-    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS( Node, this, GpsFixTopicName, UROS2Publisher::StaticClass(), UROS2NavSatFixMsg::StaticClass(), GpsHzSafe, &AROS2Controller::UpdateGpsFixMessage, UROS2QoS::SensorData, GpsFixPublisher);
     
-    // --- Setup Obstacle Manager ---
-    SetupObstacleManager();
+    auto ComputeSafeHz = [](float DesiredHz)->float {
+        return FMath::Clamp(DesiredHz, 1.f, 400.f);
+    };
+
+    const float OdomHz = ComputeSafeHz(OdometryFrequencyHz);
+    const float ImuHz  = ComputeSafeHz(ImuFrequencyHz);
+    const float TFHz   = ComputeSafeHz(TFFrequencyHz);
+    const float ClkHz  = ComputeSafeHz(ClockFrequencyHz);
+
+    // ---------- Publishers ----------
+    // /quadsim/odom
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
+        Node, this, T_Odom,
+        UROS2Publisher::StaticClass(), UROS2OdomMsg::StaticClass(),
+        OdomHz, &AROS2Controller::UpdateOdometryMessage,
+        UROS2QoS::SensorData, OdomPublisher);
+
+    // /quadsim/imu
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
+        Node, this, T_Imu,
+        UROS2Publisher::StaticClass(), UROS2ImuMsg::StaticClass(),
+        ImuHz, &AROS2Controller::UpdateImuMessage,
+        UROS2QoS::SensorData, ImuPublisher);
+
+    // /ref/vel_local
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
+        Node, this, T_RefVel,
+        UROS2Publisher::StaticClass(), UROS2ImuMsg::StaticClass(),
+        ImuHz, &AROS2Controller::UpdateDesiredVel,
+        UROS2QoS::Default, VelRef);
     
-    // --- Setup Subscribers ---
-    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ObstacleTopicName);
-    ROS2_CREATE_SUBSCRIBER(Node,this,ObstacleTopicName,UROS2Float64Msg::StaticClass(),&AROS2Controller::HandleObstacleMessage);
-    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *CmdVelTopicName);
-    ROS2_CREATE_SUBSCRIBER( Node, this, CmdVelTopicName, UROS2TwistMsg::StaticClass(), &AROS2Controller::HandleVelocityCommand);
-    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ResetTopicName);
-    ROS2_CREATE_SUBSCRIBER( Node, this, ResetTopicName, UROS2EmptyMsg::StaticClass(), &AROS2Controller::HandleResetCommand);
-    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *HoverTopicName);
-    ROS2_CREATE_SUBSCRIBER( Node, this, HoverTopicName, UROS2Float64Msg::StaticClass(), &AROS2Controller::HandleHoverCommand);
-    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *AttitudeEulerTopicName);
-    ROS2_CREATE_SUBSCRIBER(Node,this,AttitudeEulerTopicName,UROS2Vec3StampedMsg::StaticClass(),&AROS2Controller::HandleAttitudeEuler);
-    UE_LOG(LogTemp, Log, TEXT("Setting up Subscriber: %s"), *ImuTopicName);
-    ROS2_CREATE_SUBSCRIBER(Node, this, ImuTopicName, UROS2ImuMsg::StaticClass(), &AROS2Controller::HandleImuData);
-    // --- Image Capture Initialization ---
-    if (bCanCaptureImages) {
-        InitializeImageCapture();
-        if (ImgHzSafe > 0 && GetWorld()) {
-            GetWorld()->GetTimerManager().SetTimer(CaptureTimerHandle, this, &AROS2Controller::CaptureImage, 1.0f / ImgHzSafe, true);
+    // /tf
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
+        Node, this, TEXT("/tf"),
+        UROS2Publisher::StaticClass(), UROS2TFMsgMsg::StaticClass(),
+        TFHz, &AROS2Controller::UpdateTFMessage,
+        UROS2QoS::DynamicBroadcaster, TfPublisher);
+
+    // /clock
+    ROS2_CREATE_LOOP_PUBLISHER_WITH_QOS(
+        Node, this, TEXT("/clock"),
+        UROS2Publisher::StaticClass(), UROS2ClockMsg::StaticClass(),
+        ClkHz, &AROS2Controller::UpdateClockMessage,
+        UROS2QoS::Default, ClockPublisher);
+
+    // ---------- Subscribers ----------
+    // /resnet/cmd_rate (TwistStamped). Use the macro variant (avoids SetOnMessageCallback signature issues)
+    ROS2_CREATE_SUBSCRIBER(
+        Node, this, T_CmdRate,
+        UROS2TwistStampedMsg::StaticClass(),
+        &AROS2Controller::HandleCmdRateStamped);
+
+    // If you still want the 3-arg style, older rclUE usually exposes:
+    // CmdRateSubscriber = NewObject<UROS2Subscriber>(this, UROS2Subscriber::StaticClass());
+    // CmdRateSubscriber->Initialize(Node, T_CmdRate, UROS2TwistStampedMsg::StaticClass());
+    // CmdRateSubscriber->OnMessageDelegate.BindUFunction(this, FName("HandleCmdRateStamped"));
+
+    // ---------- Services (rclUE macro) ----------
+    ROS2_CREATE_SERVICE_SERVER(
+        Node, this,
+        TEXT("/quadsim/pause"),
+        UROS2SetBoolSrv::StaticClass(),
+        &AROS2Controller::SrvPause_SetBool);
+
+    ROS2_CREATE_SERVICE_SERVER(
+        Node, this,
+        TEXT("/quadsim/reset"),
+        UROS2TriggerSrv::StaticClass(),
+        &AROS2Controller::SrvReset_Trigger);
+
+    ROS2_CREATE_SERVICE_SERVER(
+        Node, this,
+        TEXT("/quadsim/step"),
+        UROS2TriggerSrv::StaticClass(),
+        &AROS2Controller::SrvStep_Trigger);
+
+    // Verify QuadPawn connection
+    AQuadPawn* QP = GetQuadPawn();
+    if (!QP)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[ROS2Controller] CRITICAL: Could not find QuadPawn! Sensor data will be zeros."));
+        UE_LOG(LogTemp, Error, TEXT("[ROS2Controller] Make sure this ROS2Controller is added as a ChildActorComponent to QuadPawn."));
+    }
+    else
+    {
+        UE_LOG(LogTemp, Display, TEXT("[ROS2Controller] Successfully connected to QuadPawn: %s"), *QP->GetName());
+
+        if (!QP->SensorManager)
+        {
+            UE_LOG(LogTemp, Error, TEXT("[ROS2Controller] WARNING: QuadPawn's SensorManager is NULL!"));
+        }
+        else if (!QP->SensorManager->IMU)
+        {
+            UE_LOG(LogTemp, Error, TEXT("[ROS2Controller] WARNING: SensorManager's IMU is NULL!"));
+        }
+        else if (!QP->SensorManager->GPS)
+        {
+            UE_LOG(LogTemp, Error, TEXT("[ROS2Controller] WARNING: SensorManager's GPS is NULL!"));
+        }
+        else
+        {
+            UE_LOG(LogTemp, Display, TEXT("[ROS2Controller] All sensors verified OK."));
         }
     }
-    
-    UE_LOG(LogTemp, Warning, TEXT("AROS2Controller initialization complete for %s."), *Pawn->GetName());
+
+    UE_LOG(LogTemp, Display, TEXT("[ROS2] Minimal map ready: /clock, /tf(/_static), /quadsim/odom, /quadsim/imu, srv(/pause,/reset,/step), sub /resnet/cmd_rate"));
 }
+
 
 void AROS2Controller::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-    if (GetWorld()) // Check if World is valid
-    {
-        GetWorld()->GetTimerManager().ClearTimer(CaptureTimerHandle);
-    }
-
     Super::EndPlay(EndPlayReason);
     UE_LOG(LogTemp, Warning, TEXT("AROS2Controller EndPlay called."));
 }
 
-void AROS2Controller::HandleImuData(const UROS2GenericMsg* InMsg)
+AQuadPawn* AROS2Controller::GetQuadPawn()
 {
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    UActorComponent* DroneController = Pawn ? Pawn->GetComponentByClass(UActorComponent::StaticClass()) : nullptr;
-    if (!InMsg)
+    // Return cached reference if valid
+    if (CachedQuadPawn.IsValid())
     {
-        UE_LOG(LogTemp, Error, TEXT("HandleImuData: InMsg is null"));
-        return;
+        return CachedQuadPawn.Get();
     }
 
-    const UROS2ImuMsg* ImuMsgWrapper = Cast<UROS2ImuMsg>(InMsg);
-    if (!ImuMsgWrapper)
+    // Try multiple methods to find the QuadPawn
+    AQuadPawn* QP = nullptr;
+
+    // Method 1: Check if we're owned by a QuadPawn (ChildActorComponent case)
+    if (AActor* Owner = GetOwner())
     {
-        UE_LOG(LogTemp, Error, TEXT("HandleImuData: Cast to UROS2ImuMsg failed"));
-        return;
+        QP = Cast<AQuadPawn>(Owner);
+        if (QP)
+        {
+            UE_LOG(LogTemp, Display, TEXT("ROS2Controller: Found QuadPawn via GetOwner(): %s"), *QP->GetName());
+            CachedQuadPawn = QP;
+            return QP;
+        }
     }
 
-    FROSImu ImuData;
-    ImuMsgWrapper->GetMsg(ImuData);
+    // Method 2: Check if we're attached to a QuadPawn (direct attachment case)
+    if (AActor* Parent = GetAttachParentActor())
+    {
+        QP = Cast<AQuadPawn>(Parent);
+        if (QP)
+        {
+            UE_LOG(LogTemp, Display, TEXT("ROS2Controller: Found QuadPawn via GetAttachParentActor(): %s"), *QP->GetName());
+            CachedQuadPawn = QP;
+            return QP;
+        }
+    }
 
-    // Convert radians/s to degrees/s
-    const FVector AngularVelocityRad = ImuData.AngularVelocity;
-    const FVector AngularVelocityDeg = FMath::RadiansToDegrees(AngularVelocityRad);
+    // Method 3: Search for QuadPawn in the same level (fallback)
+    if (UWorld* World = GetWorld())
+    {
+        for (TActorIterator<AQuadPawn> It(World); It; ++It)
+        {
+            QP = *It;
+            UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: Using fallback - found QuadPawn in level: %s"), *QP->GetName());
+            CachedQuadPawn = QP;
+            return QP;
+        }
+    }
 
-    // Optional: log it
-    UE_LOG(LogTemp, Log, TEXT("IMU Angular Velocity [deg/s]: X=%.2f Y=%.2f Z=%.2f"),
-        AngularVelocityDeg.X,
-        AngularVelocityDeg.Y,
-        AngularVelocityDeg.Z);
+    static bool bLoggedError = false;
+    if (!bLoggedError)
+    {
+        UE_LOG(LogTemp, Error, TEXT("ROS2Controller: Could not find QuadPawn via any method!"));
+        bLoggedError = true;
+    }
 
-    // Send yaw rate command to drone controller via generic interface
-    UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Received yaw rate command: %.2f deg/s"), AngularVelocityDeg.Z);
-    
+    return nullptr;
 }
+
+void AROS2Controller::UpdateImuMessage(UROS2GenericMsg* InMessage)
+{
+    auto* QP  = GetQuadPawn();
+    auto* Msg = Cast<UROS2ImuMsg>(InMessage);
+
+    if (!QP)
+    {
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
+        {
+            UE_LOG(LogTemp, Error, TEXT("UpdateImuMessage: QuadPawn is NULL. Is ROS2Controller set up correctly?"));
+            bLoggedOnce = true;
+        }
+        return;
+    }
+    if (!QP->SensorManager)
+    {
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
+        {
+            UE_LOG(LogTemp, Error, TEXT("UpdateImuMessage: SensorManager is NULL."));
+            bLoggedOnce = true;
+        }
+        return;
+    }
+    if (!QP->SensorManager->IMU)
+    {
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
+        {
+            UE_LOG(LogTemp, Error, TEXT("UpdateImuMessage: IMU sensor is NULL."));
+            bLoggedOnce = true;
+        }
+        return;
+    }
+    if (!Msg)
+    {
+        UE_LOG(LogTemp, Error, TEXT("UpdateImuMessage: Message is NULL."));
+        return;
+    }
+
+    FROSImu I{};
+    I.Header.Stamp   = GetSimTimeStamp();
+    I.Header.FrameId = TEXT("imu_link");
+
+    // Orientation from your IMU (deg → quat done inside Quaternion())
+    const FRotator att_d = QP->SensorManager->IMU->GetLastAttitude();
+    I.Orientation = att_d.Quaternion();
+
+    // Angular velocity [rad/s]
+    I.AngularVelocity = QP->SensorManager->IMU->GetLastGyroscope();
+
+    // Linear acceleration [m/s^2]
+    I.LinearAcceleration = QP->SensorManager->IMU->GetLastAccelerometer();
+
+    Msg->SetMsg(I);
+}
+
+void AROS2Controller::UpdateDesiredVel(UROS2GenericMsg* InMessage)
+{
+    auto* QP  = GetQuadPawn();
+    auto* Msg = Cast<UROS2ImuMsg>(InMessage);
+
+    if (!QP)
+    {
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
+        {
+            UE_LOG(LogTemp, Error, TEXT("UpdateImuMessage: QuadPawn is NULL. Is ROS2Controller set up correctly?"));
+            bLoggedOnce = true;
+        }
+        return;
+    }
+    if (!QP->SensorManager)
+    {
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
+        {
+            UE_LOG(LogTemp, Error, TEXT("UpdateImuMessage: SensorManager is NULL."));
+            bLoggedOnce = true;
+        }
+        return;
+    }
+    if (!QP->SensorManager->IMU)
+    {
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
+        {
+            UE_LOG(LogTemp, Error, TEXT("UpdateImuMessage: IMU sensor is NULL."));
+            bLoggedOnce = true;
+        }
+        return;
+    }
+    if (!Msg)
+    {
+        UE_LOG(LogTemp, Error, TEXT("UpdateImuMessage: Message is NULL."));
+        return;
+    }
+
+    FROSImu I{};
+    I.Header.Stamp   = GetSimTimeStamp();
+    I.Header.FrameId = TEXT("imu_link");
+
+    // Orientation from your IMU (deg → quat done inside Quaternion())
+    const FRotator att_d = QP->SensorManager->IMU->GetLastAttitude();
+    I.Orientation = att_d.Quaternion();
+
+    // Angular velocity [rad/s]
+    I.AngularVelocity = QP->SensorManager->IMU->GetLastGyroscope();
+
+    // Linear acceleration [m/s^2]
+    I.LinearAcceleration = QP->SensorManager->IMU->GetLastAccelerometer();
+
+    Msg->SetMsg(I);
+}
+
 
 void AROS2Controller::HandleHoverCommand(const UROS2GenericMsg* InMsg)
 {
     if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleHoverMessage: InMsg is null")); return; }
-    const UROS2Float64Msg* Float64MsgWrapper = Cast<UROS2Float64Msg>(InMsg); 
-    FROSFloat64 HoverData; 
+    const UROS2Float64Msg* Float64MsgWrapper = Cast<UROS2Float64Msg>(InMsg);
+    FROSFloat64 HoverData;
     Float64MsgWrapper->GetMsg(HoverData);
     const int32 HoverHeight = FMath::RoundToInt(HoverData.Data);
     UE_LOG(LogTemp, Log, TEXT("Received Hover Height: %d"), HoverHeight);
 
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleHoverCommand: Owning Pawn invalid")); return; }
-    UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
-    if (!IsValid(DroneController)) { UE_LOG(LogTemp, Warning, TEXT("HandleHoverCommand: DroneController invalid")); return; }
+    AQuadPawn* QP = GetQuadPawn();
+    if (!QP) { UE_LOG(LogTemp, Error, TEXT("HandleHoverCommand: QuadPawn invalid")); return; }
+
     UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Hover command received - Height: %.2f"), (float)HoverHeight);
-    // Send hover command to QuadPawn directly
-    if (AQuadPawn* QP = Cast<AQuadPawn>(Pawn))
-    {
-        QP->SetExternalHoverHeight((float)HoverHeight);
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: Pawn is not AQuadPawn; cannot set hover height directly."));
-    }
+    QP->SetExternalHoverHeight((float)HoverHeight);
 }
 
 void AROS2Controller::HandleAttitudeEuler(const UROS2GenericMsg* InMsg)
 {
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
-
     if (!InMsg)
     {
         UE_LOG(LogTemp, Error, TEXT("HandleAttitudeEulerStamped: InMsg is null"));
@@ -268,6 +426,13 @@ void AROS2Controller::HandleAttitudeEuler(const UROS2GenericMsg* InMsg)
         return;
     }
 
+    AQuadPawn* QP = GetQuadPawn();
+    if (!QP)
+    {
+        UE_LOG(LogTemp, Error, TEXT("HandleAttitudeEuler: QuadPawn invalid"));
+        return;
+    }
+
     FROSVec3Stamped StampedData;
     Vec3StampedMsg->GetMsg(StampedData);
 
@@ -276,476 +441,282 @@ void AROS2Controller::HandleAttitudeEuler(const UROS2GenericMsg* InMsg)
     float YawDeg =   FMath::RadiansToDegrees(StampedData.Vector.Z);
 
     UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Attitude command - Roll: %.2f, Pitch: %.2f, Yaw: %.2f"), RollDeg, PitchDeg, YawDeg);
-    // Send attitude command to QuadPawn directly
-    if (AQuadPawn* QP = Cast<AQuadPawn>(Pawn))
-    {
-        QP->SetExternalAttitudeCommand(RollDeg, PitchDeg);
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: Pawn is not AQuadPawn; cannot set attitude directly."));
-    }
-}
-
-void AROS2Controller::SetupObstacleManager()
-{
-    UWorld* World = GetWorld();
-    if (!World)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: No world to find ObstacleManager"));
-        return;
-    }
-    AActor* Found = UGameplayStatics::GetActorOfClass(World, AObstacleManager::StaticClass());
-    if (Found)
-    {
-        ObstacleManagerInstance = Found;
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Found ObstacleManager %s"), *Found->GetName());
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: ObstacleManager not found in world"));
-    }
-}
-
-void AROS2Controller::HandleObstacleMessage(const UROS2GenericMsg* InMsg)
-{
-    if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: InMsg is null")); return; }
-    const UROS2Float64Msg* Float64MsgWrapper = Cast<UROS2Float64Msg>(InMsg); 
-    if (!Float64MsgWrapper) { UE_LOG(LogTemp, Error, TEXT("HandleObstacleMessage: Invalid msg type")); return; }
-
-    if (!IsValid(ObstacleManagerInstance))
-    {
-        SetupObstacleManager();
-    }
-
-    FROSFloat64 ObstacleData; 
-    Float64MsgWrapper->GetMsg(ObstacleData);
-    const int32 ObstacleCount = FMath::RoundToInt(ObstacleData.Data);
-    LastReceivedObstacleCount = ObstacleCount; 
-    if (AObstacleManager* OM = Cast<AObstacleManager>(ObstacleManagerInstance))
-    {
-        UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Spawning %d obstacles via ObstacleManager"), ObstacleCount);
-        OM->CreateObstacles(ObstacleCount, EGoalPosition::Random);
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: ObstacleManager not available; cannot spawn obstacles"));
-    }
-    UE_LOG(LogTemp, Log, TEXT("Received obstacle count: %d"), ObstacleCount);
-    
+    QP->SetExternalAttitudeCommand(RollDeg, PitchDeg);
 }
 
 void AROS2Controller::HandleVelocityCommand(const UROS2GenericMsg* InMsg)
 {
-
-    if (!InMsg) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: InMsg is null")); return; }
     const UROS2TwistMsg* TwistMsgWrapper = Cast<UROS2TwistMsg>(InMsg);
-    if (!TwistMsgWrapper) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: Invalid msg type")); return; }
+    if (!TwistMsgWrapper) return;
 
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleVelocityCommand: Owning Pawn invalid")); return; }
-    UActorComponent* DroneController = Pawn->GetComponentByClass(UActorComponent::StaticClass());
-    if (!IsValid(DroneController)) { UE_LOG(LogTemp, Warning, TEXT("HandleVelocityCommand: DroneController invalid")); return; }
+    FROSTwist Twist{};
+    TwistMsgWrapper->GetMsg(Twist);
 
-    FROSTwist TwistData;
-    TwistMsgWrapper->GetMsg(TwistData);
+    // NEW semantics:
+    // angular = [p,q,r] rad/s (body rates)
+    // linear.z = thrust (normalized 0..1 or N)  <-- document which one you use!
+    const FVector BodyRateRps(Twist.Angular.X, Twist.Angular.Y, Twist.Angular.Z);
+    const float   ThrustCmd = Twist.Linear.Z;
 
-    const float TargetLinearXVelocity_cms = TwistData.Linear.X;
-    const float TargetLinearYVelocity_cms = TwistData.Linear.Y;
-    const float TargetLinearZVelocity_cms = TwistData.Linear.Z;
-
-    FVector DesiredVelocityVector = FVector(TargetLinearXVelocity_cms, TargetLinearYVelocity_cms, TargetLinearZVelocity_cms);
-    const float TargetAngularZ_radps = TwistData.Angular.Z;
-    UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Velocity command - Linear: %s, Angular Z: %.2f"), *DesiredVelocityVector.ToString(), TargetAngularZ_radps);
-    
-    // Directly call QuadPawn setter
-    if (AQuadPawn* QP = Cast<AQuadPawn>(Pawn))
+    if (AQuadPawn* QP = GetQuadPawn())
     {
-        QP->SetExternalVelocityCommand(DesiredVelocityVector, FVector(0.f, 0.f, TargetAngularZ_radps));
+        // TODO: provide a method that applies body-rate + thrust on next step
+        // QP->ApplyExternalRateThrust(BodyRateRps, ThrustCmd);
     }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("ROS2Controller: Pawn is not AQuadPawn; cannot set velocity directly."));
-    }
-
 }
 
 void AROS2Controller::HandleResetCommand(const UROS2GenericMsg* InMsg)
 {
     UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Processing 'reset' command (received Empty message)..."));
 
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!Pawn) { UE_LOG(LogTemp, Error, TEXT("HandleResetCommand: Owning Pawn invalid")); return; }
+    AQuadPawn* QP = GetQuadPawn();
+    if (!QP) { UE_LOG(LogTemp, Error, TEXT("HandleResetCommand: QuadPawn invalid")); return; }
+
     UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Reset command received"));
-    if (AQuadPawn* QP = Cast<AQuadPawn>(Pawn))
-    {
-        QP->ResetRotation();
-        QP->ResetPosition();
-        if (QP->QuadController) QP->QuadController->ResetPID();
-        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Reset command processed (direct calls)."));
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Pawn is not AQuadPawn; cannot reset directly."));
-    }
+    QP->ResetRotation();
+    QP->ResetPosition();
+    if (QP->QuadController) QP->QuadController->ResetPID();
+    UE_LOG(LogTemp, Warning, TEXT("AROS2Controller: Reset command processed (direct calls)."));
 }
 
-void AROS2Controller::UpdateGoalPositionMessage(UROS2GenericMsg* InMessage)
+void AROS2Controller::HandleCmdRateStamped(const UROS2GenericMsg* InMessage)
 {
-    if (!InMessage) return;
+    const UROS2TwistStampedMsg* Wrap = Cast<const UROS2TwistStampedMsg>(InMessage);
+    if (!Wrap) return;
 
-    FROSPoint GoalData;
-    // Goal position not available from generic system - use default
-    const FVector GoalLocation = FVector::ZeroVector;
-    
-    GoalData.X = GoalLocation.X;
-    GoalData.Y = GoalLocation.Y;
-    GoalData.Z = GoalLocation.Z;
-    
-    if(UROS2PointMsg* GoalMsg = Cast<UROS2PointMsg>(InMessage))
+    FROSTwistStamped TS{};
+    Wrap->GetMsg(TS);
+
+    const FVector BodyRateRps(TS.Twist.Angular.X, TS.Twist.Angular.Y, TS.Twist.Angular.Z);
+    const float   ThrustCmd  = TS.Twist.Linear.Z; // define: 0–1 or Newtons
+
+    if (AQuadPawn* QP = GetQuadPawn())
     {
-        GoalMsg->SetMsg(GoalData);
+        // QP->ApplyExternalRateThrust(BodyRateRps, ThrustCmd);
     }
-    else { UE_LOG(LogTemp, Error, TEXT("UpdateGoalPositionMessage: Failed cast to UROS2PointMsg")); }
 }
 
-void AROS2Controller::UpdateCollisionMessage(UROS2GenericMsg* InMessage)
-{
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!Pawn || !InMessage) return;
-    UROS2Float64Msg* Msg = Cast<UROS2Float64Msg>(InMessage);
-    if (!Msg) return;
-    FROSFloat64 CollisionData;
-    // Get collision state directly from QuadPawn
-    bool bCollisionState = false;
-    if (AQuadPawn* QP = Cast<AQuadPawn>(Pawn))
-    {
-        bCollisionState = QP->HasCollided();
-    }
-    CollisionData.Data = bCollisionState ? 1.0 : 0.0;
-    Msg->SetMsg(CollisionData);
-}
 
 void AROS2Controller::UpdateOdometryMessage(UROS2GenericMsg* InMessage)
 {
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!Pawn || !InMessage || !IsValid(OdometryPublisher)) return;
+    auto* QP = GetQuadPawn();
+    auto* Msg = Cast<UROS2OdomMsg>(InMessage);
 
-    FROSOdom OdometryData;
-
-    // Header
-    FTimespan Time = FDateTime::UtcNow().GetTimeOfDay();
-    OdometryData.Header.Stamp.Sec = static_cast<int32>(Time.GetTotalSeconds());
-    OdometryData.Header.Stamp.Nanosec = static_cast<uint32>(Time.GetFractionNano());
-    OdometryData.Header.FrameId = TEXT("odom");       // Pose is relative to the odom frame
-    OdometryData.ChildFrameId = TEXT("base_link"); // Twist is relative to the base_link frame
-
-    // Pose and twist from RobotCore sensors via QuadPawn
-    const AQuadPawn* QP = Cast<AQuadPawn>(Pawn);
-    if (!QP || !QP->SensorManager || !QP->SensorManager->GPS || !QP->SensorManager->IMU)
+    if (!QP)
     {
-        UE_LOG(LogTemp, Warning, TEXT("UpdateOdometryMessage: Missing sensor manager or sensors on pawn."));
-        return;
-    }
-    // Position in meters
-    const FVector GPSMeters = QP->SensorManager->GPS->GetLastGPS();
-    // Use baro altitude (meters) if available
-    float AltMeters = GPSMeters.Z;
-    if (QP->SensorManager->Barometer)
-    {
-        AltMeters = QP->SensorManager->Barometer->GetEstimatedAltitude();
-    }
-    const FRotator AttDeg = QP->SensorManager->IMU->GetLastAttitude();
-    const FQuat AttQuat = AttDeg.Quaternion();
-
-    OdometryData.Pose.Pose.Position.X = GPSMeters.X;
-    OdometryData.Pose.Pose.Position.Y = GPSMeters.Y;
-    OdometryData.Pose.Pose.Position.Z = AltMeters;
-    OdometryData.Pose.Pose.Orientation = AttQuat;
-
-    // Twist in body frame from IMU
-    const FVector LocalVelMps = QP->SensorManager->IMU->GetLastVelocity();
-    const FVector BodyAngRad = QP->SensorManager->IMU->GetLastGyroscope();
-
-    OdometryData.Twist.Twist.Linear.X = LocalVelMps.X;
-    OdometryData.Twist.Twist.Linear.Y = LocalVelMps.Y;
-    OdometryData.Twist.Twist.Linear.Z = LocalVelMps.Z;
-
-    OdometryData.Twist.Twist.Angular.X = BodyAngRad.X;
-    OdometryData.Twist.Twist.Angular.Y = BodyAngRad.Y;
-    OdometryData.Twist.Twist.Angular.Z = BodyAngRad.Z;
-
-    // Set message data
-    if (UROS2OdomMsg* OdometryMsg = Cast<UROS2OdomMsg>(InMessage))
-    {
-        OdometryMsg->SetMsg(OdometryData);
-    }
-    else { UE_LOG(LogTemp, Error, TEXT("UpdateOdometryMessage: Failed cast to UROS2OdomMsg")); }
-}
-
-void AROS2Controller::InitializeImageCapture()
-{
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!Pawn || !SceneCapture)
-    {
-        UE_LOG(LogTemp, Error, TEXT("Missing required components for image capture!"));
-        return;
-    }
-
-    // Find camera component generically
-    UCameraComponent* CameraComponent = Cast<UCameraComponent>(Pawn->GetComponentByClass(UCameraComponent::StaticClass()));
-    if (!CameraComponent)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("No camera component found - image capture disabled"));
-        return;
-    }
-
-    if (!SceneCapture->IsAttachedTo(CameraComponent))
-    {
-        SceneCapture->AttachToComponent(CameraComponent,
-            FAttachmentTransformRules::SnapToTargetIncludingScale);
-    }
-    SceneCapture->RegisterComponent();
-    SceneCapture->HiddenActors.Add(Pawn);
-
-    for (int32 i = 0; i < 2; ++i)
-    {
-        RenderTargets[i] = NewObject<UTextureRenderTarget2D>(this);
-        RenderTargets[i]->InitCustomFormat(
-            ImageResolution.X,
-            ImageResolution.Y,
-            PF_B8G8R8A8, 
-            true  
-        );
-        RenderTargets[i]->TargetGamma = 2.2f;
-        RenderTargets[i]->UpdateResourceImmediate(true);
-    }
-
-    SceneCapture->FOVAngle = CameraComponent->FieldOfView;
-    SceneCapture->ShowFlags.SetTonemapper(true);
-    SceneCapture->CaptureSource = SCS_FinalColorLDR;
-    SceneCapture->bCaptureEveryFrame = false;
-    SceneCapture->bAlwaysPersistRenderingState = true;
-}
-
-void AROS2Controller::CaptureImage()
-{
-    if (!SceneCapture || bIsProcessingImage) return;
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!Pawn) return;
-
-    // Find camera component generically
-    UCameraComponent* CameraComponent = Cast<UCameraComponent>(Pawn->GetComponentByClass(UCameraComponent::StaticClass()));
-    if (!CameraComponent) return;
-
-    SceneCapture->SetWorldLocationAndRotation(
-        CameraComponent->GetComponentLocation(),
-        CameraComponent->GetComponentRotation()
-    );
-
-    const FVector CaptureLocation = CameraComponent->GetComponentLocation();
-    const FRotator CameraFullRotation = CameraComponent->GetComponentRotation();
-
-    const FRotator CaptureYawOnlyRotation = FRotator(0.0f, CameraFullRotation.Yaw, 0.0f);
-    SceneCapture->SetWorldLocationAndRotation(CaptureLocation, CaptureYawOnlyRotation);
-    
-    CurrentRenderTargetIndex = (CurrentRenderTargetIndex + 1) % 2;
-    UTextureRenderTarget2D* CurrentTarget = RenderTargets[CurrentRenderTargetIndex];
-    
-    SceneCapture->TextureTarget = CurrentTarget;
-    SceneCapture->CaptureScene();
-
-    FTextureRenderTargetResource* RTResource = CurrentTarget->GameThread_GetRenderTargetResource();
-    if (!RTResource) return;
-
-    bIsProcessingImage = true;
-    
-    ENQUEUE_RENDER_COMMAND(CaptureImageCommand)(
-        [this, RTResource](FRHICommandListImmediate& RHICmdList)
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
         {
-            TArray<FColor> Pixels;
-            RHICmdList.ReadSurfaceData(
-                RTResource->GetRenderTargetTexture(),
-                FIntRect(0, 0, ImageResolution.X, ImageResolution.Y),
-                Pixels,
-                FReadSurfaceDataFlags(RCM_UNorm, CubeFace_MAX)
-            );
-
-            AsyncTask(ENamedThreads::GameThread, [this, Pixels]()
-            {
-                ProcessCapturedImage(Pixels);
-            });
+            UE_LOG(LogTemp, Error, TEXT("UpdateOdometryMessage: QuadPawn is NULL. Is ROS2Controller set up correctly?"));
+            bLoggedOnce = true;
         }
-    );
-
-    
-}
-
-void AROS2Controller::ProcessCapturedImage(const TArray<FColor>& Pixels)
-{
-    if (Pixels.Num() == 0)
+        return;
+    }
+    if (!QP->SensorManager)
     {
-        UE_LOG(LogTemp, Warning, TEXT("Failed to capture image data"));
-        bIsProcessingImage = false;
+        static bool bLoggedOnce = false;
+        if (!bLoggedOnce)
+        {
+            UE_LOG(LogTemp, Error, TEXT("UpdateOdometryMessage: SensorManager is NULL."));
+            bLoggedOnce = true;
+        }
+        return;
+    }
+    if (!Msg)
+    {
+        UE_LOG(LogTemp, Error, TEXT("UpdateOdometryMessage: Message is NULL."));
         return;
     }
 
-    FROSImg ImageMsg;
-    ImageMsg.Height = ImageResolution.Y;
-    ImageMsg.Width = ImageResolution.X;
-    ImageMsg.Encoding = "bgr8";
-    ImageMsg.Step = ImageResolution.X * 3;
-    ImageMsg.Data.Reserve(Pixels.Num() * 3);
+    FROSOdom O{};
+    O.Header.Stamp = GetSimTimeStamp();
+    O.Header.FrameId = TEXT("odom");
+    O.ChildFrameId   = TEXT("base_link");
 
-    for (const FColor& Pixel : Pixels)
-    {
-        ImageMsg.Data.Add(Pixel.B);  
-        ImageMsg.Data.Add(Pixel.G);  
-        ImageMsg.Data.Add(Pixel.R);  
-    }
+    const FVector pos_m  = QP->SensorManager->GPS ? QP->SensorManager->GPS->GetLastGPS() : FVector::ZeroVector;
+    const FRotator att_d = QP->SensorManager->IMU ? QP->SensorManager->IMU->GetLastAttitude() : FRotator::ZeroRotator;
+    const FVector v_lin  = QP->SensorManager->IMU ? QP->SensorManager->IMU->GetLastVelocity() : FVector::ZeroVector;
+    const FVector w_rps  = QP->SensorManager->IMU ? QP->SensorManager->IMU->GetLastGyroscope() : FVector::ZeroVector;
 
-    if (IsValid(ImagePublisher) && IsValid(ImagePublisher->TopicMessage))
-    {
-        if (UROS2ImgMsg* Msg = Cast<UROS2ImgMsg>(ImagePublisher->TopicMessage))
-        {
-            Msg->SetMsg(ImageMsg);
-            ImagePublisher->Publish();
-        }
-    }
-    else 
-    {
-        UE_LOG(LogTemp, Error, TEXT("ImagePublisher invalid: %d, Msg: %d"), 
-            IsValid(ImagePublisher), 
-            (ImagePublisher ? IsValid(ImagePublisher->TopicMessage) : false));
-    }
+    O.Pose.Pose.Position = pos_m;
+    O.Pose.Pose.Orientation = att_d.Quaternion();
 
-    bIsProcessingImage = false;
-}
+    O.Twist.Twist.Linear  = v_lin;
+    O.Twist.Twist.Angular = w_rps;
 
-void AROS2Controller::UpdateImageMessage(UROS2GenericMsg* InMessage)
-{
-}
-// Accessor implementations for UI
-FVector AROS2Controller::GetCurrentGoalPosition() const
-{
-    // Goal position not available from generic system
-    return FVector::ZeroVector;
+    Msg->SetMsg(O);
 }
 
 FString AROS2Controller::GetDroneID() const
 {
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    return Pawn ? Pawn->GetName() : FString(TEXT("Unknown"));
+    // Note: const_cast needed because GetQuadPawn() is non-const (caches reference)
+    AQuadPawn* QP = const_cast<AROS2Controller*>(this)->GetQuadPawn();
+    return QP ? QP->GetName() : FString(TEXT("Unknown"));
 }
 
 void AROS2Controller::UpdateTFMessage(UROS2GenericMsg* InMsg)
 {
-    // 1) Cast to the actual wrapper class name from ROS2TFMsg.h
-    auto* TfMsg = Cast<UROS2TFMsgMsg>(InMsg); // *** Use UROS2TFMsgMsg ***
-    if (!TfMsg) return;
+    static bool bEmittedStatic = false;
 
-    APawn* Pawn = Cast<APawn>(GetAttachParentActor());
-    if (!IsValid(Pawn)) return;
+    auto* TfMsg = Cast<UROS2TFMsgMsg>(InMsg);
+    auto* Pawn  = GetQuadPawn();
+    if (!TfMsg || !Pawn) return;
 
-    // 2) Build the ROS C-struct TransformStamped
-    geometry_msgs__msg__TransformStamped tf_stamped;
-    if (!geometry_msgs__msg__TransformStamped__init(&tf_stamped)) {
-        UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to init TransformStamped C-struct"));
-        return;
-    }
+    FROSTFMsg tfmsg;
 
-    // Auto-cleanup for the C-struct
-    struct FScopeFiniGuard {
-        geometry_msgs__msg__TransformStamped* Ptr;
-        FScopeFiniGuard(geometry_msgs__msg__TransformStamped* InPtr) : Ptr(InPtr) {}
-        ~FScopeFiniGuard() { if(Ptr) geometry_msgs__msg__TransformStamped__fini(Ptr); }
-    } TfGuard(&tf_stamped);
-
-    // Populate Header
-    FTimespan Time = FDateTime::UtcNow().GetTimeOfDay();
-    tf_stamped.header.stamp.sec = static_cast<int32>(Time.GetTotalSeconds());
-    tf_stamped.header.stamp.nanosec = static_cast<uint32>(Time.GetFractionNano());
-    if (!rosidl_runtime_c__String__assign(&tf_stamped.header.frame_id, TCHAR_TO_UTF8(*FString("odom")))) {
-       UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to assign header.frame_id")); return;
-    }
-    if (!rosidl_runtime_c__String__assign(&tf_stamped.child_frame_id, TCHAR_TO_UTF8(*FString("base_link")))) {
-       UE_LOG(LogTemp, Error, TEXT("UpdateTFMessage: Failed to assign child_frame_id")); return;
-    }
-
-    // Populate Transform using Utility Function; prefer sensor-derived transform if available
-    FTransform UETransform = Pawn->GetActorTransform();
-    if (AQuadPawn* QP = Cast<AQuadPawn>(Pawn))
+    if (!bEmittedStatic)
     {
-        if (QP->SensorManager && QP->SensorManager->GPS && QP->SensorManager->IMU)
-        {
-            const FVector GPSMeters = QP->SensorManager->GPS->GetLastGPS();
-            float AltMeters = GPSMeters.Z;
-            if (QP->SensorManager->Barometer)
-            {
-                AltMeters = QP->SensorManager->Barometer->GetEstimatedAltitude();
-            }
-            const FVector UELocationCm = FVector(GPSMeters.X*100.f, GPSMeters.Y*100.f, AltMeters*100.f);
-            const FRotator AttDeg = QP->SensorManager->IMU->GetLastAttitude();
-            UETransform = FTransform(AttDeg, UELocationCm);
-        }
+        geometry_msgs__msg__TransformStamped s;
+        geometry_msgs__msg__TransformStamped__init(&s);
+        rosidl_runtime_c__String__assign(&s.header.frame_id, "world");
+        rosidl_runtime_c__String__assign(&s.child_frame_id,  "odom");
+        s.header.stamp.sec = 0; s.header.stamp.nanosec = 0;
+        s.transform.rotation.w = 1.0;
+        FROSTFStamped us; us.SetFromROS2(s);
+        tfmsg.Transforms.Add(us);
+        geometry_msgs__msg__TransformStamped__fini(&s);
+        bEmittedStatic = true;
     }
-    tf_stamped.transform = UROS2Utils::TransformUEToROS(UETransform);
 
-    // 3) Convert C-struct into the UE FStruct wrapper using the CONFIRMED method
-    FROSTFStamped ue_stamp;
-    ue_stamp.SetFromROS2(tf_stamped); // This method name is confirmed from ROS2TFStamped.h
+    geometry_msgs__msg__TransformStamped d;
+    geometry_msgs__msg__TransformStamped__init(&d);
+    const FROSTime t = GetSimTimeStamp();
+    d.header.stamp.sec = t.Sec; d.header.stamp.nanosec = t.Nanosec;
+    rosidl_runtime_c__String__assign(&d.header.frame_id, "odom");
+    rosidl_runtime_c__String__assign(&d.child_frame_id,  "base_link");
+    d.transform = UROS2Utils::TransformUEToROS(Pawn->GetActorTransform());
 
-    // (Fini will be called by TfGuard)
+    FROSTFStamped ud; ud.SetFromROS2(d);
+    tfmsg.Transforms.Add(ud);
+    TfMsg->SetMsg(tfmsg);
 
-    // 4) Prepare the main message FStruct
-    FROSTFMsg ue_msg;
-    ue_msg.Transforms.Add(ue_stamp);
-
-    // 5) Call SetMsg on the correct wrapper object type
-    // If the "Cannot convert FROSTFMsg to FROSTF" error still occurs HERE,
-    // it indicates a deeper issue possibly within RCLUE's handling of UROS2TFMsgMsg.
-    TfMsg->SetMsg(ue_msg);
+    geometry_msgs__msg__TransformStamped__fini(&d);
 }
 
-void AROS2Controller::UpdateGpsFixMessage(UROS2GenericMsg* InMsg)
+void AROS2Controller::UpdateClockMessage(UROS2GenericMsg* InMessage)
 {
-    auto* FixMsg = Cast<UROS2NavSatFixMsg>(InMsg);
-    if (!FixMsg) return;
-    AQuadPawn* QP = Cast<AQuadPawn>(GetAttachParentActor());
-    if (!QP || !QP->SensorManager || !QP->SensorManager->GPS)
-        return;
+    auto* Msg = Cast<UROS2ClockMsg>(InMessage);
+    if (!Msg) return;
 
-    const FVector Geo = QP->SensorManager->GPS->GetGeographicCoordinates();
-    FROSNavSatFix Fix;
-    Fix.Header.FrameId = TEXT("gps_link");
-    Fix.Status.Status = FROSNavSatStatus::STATUS_FIX;
-    Fix.Status.Service = FROSNavSatStatus::SERVICE_GPS;
-    Fix.Latitude = Geo.X;   // degrees
-    Fix.Longitude = Geo.Y;  // degrees
-    Fix.Altitude = Geo.Z;   // meters MSL
-    Fix.PositionCovarianceType = FROSNavSatFix::COVARIANCE_TYPE_UNKNOWN;
-    FixMsg->SetMsg(Fix);
+    // Prefer your UTimeController if available
+    FROSTime t = GetSimTimeStamp();
+    FROSClock C{}; C.Clock = t;
+    Msg->SetMsg(C);
 }
-void AROS2Controller::HandleGoalPose(const UROS2GenericMsg* InMsg)
+
+FROSTime AROS2Controller::GetSimTimeStamp() const
 {
-    auto* PoseWrap = Cast<UROS2PoseStampedMsg>(InMsg);
-    if (!PoseWrap) return;
-
-    // unwrap the ROS message
-    FROSPoseStamped rosPose;
-    PoseWrap->GetMsg(rosPose);
-
-    // directly grab the UE FVector (no manual .X/.Y/.Z needed)
-    FVector goal_loc = rosPose.Pose.Position;
-
-    UE_LOG(LogTemp, Log, TEXT("New ROS goal at %s"), *goal_loc.ToString());
-
-    // feed it to navigation component if available
-    if (APawn* Pawn = Cast<APawn>(GetAttachParentActor()))
+    double seconds = 0.0;
+    if (SimManager.IsValid())
     {
-        if (UActorComponent* NavComponent = Pawn->GetComponentByClass(UActorComponent::StaticClass()))
-        {
-            UE_LOG(LogTemp, Log, TEXT("ROS2Controller: Navigation component found, setting destination"));
-        }
+        seconds = SimManager->GetCurrentSimTimeSeconds();
     }
+    else
+    {
+        // fallback to wall-clock if manager not present
+        const FTimespan TS = FDateTime::UtcNow().GetTimeOfDay();
+        seconds = TS.GetTotalSeconds();
+    }
+    FROSTime Out{};
+    Out.Sec     = static_cast<int32>(seconds);
+    Out.Nanosec = static_cast<uint32>((seconds - Out.Sec) * 1e9);
+    return Out;
+}
+
+void AROS2Controller::PublishTFStaticOnce()
+{
+    if (!IsValid(TfStaticPublisher) || !IsValid(TfStaticPublisher->TopicMessage)) return;
+
+    FROSTFMsg tfmsg;
+
+    // world -> odom (identity)
+    {
+        geometry_msgs__msg__TransformStamped tf_cs;
+        geometry_msgs__msg__TransformStamped__init(&tf_cs);
+        rosidl_runtime_c__String__assign(&tf_cs.header.frame_id, "world");
+        rosidl_runtime_c__String__assign(&tf_cs.child_frame_id,  "odom");
+        tf_cs.header.stamp.sec = 0;
+        tf_cs.header.stamp.nanosec = 0;
+        tf_cs.transform.rotation.w = 1.0; // identity
+
+        FROSTFStamped ue_stamp; ue_stamp.SetFromROS2(tf_cs);
+        tfmsg.Transforms.Add(ue_stamp);
+
+        geometry_msgs__msg__TransformStamped__fini(&tf_cs);
+    }
+
+    // Reuse the publisher’s existing message object
+    if (auto* Wrap = Cast<UROS2TFMsgMsg>(TfStaticPublisher->TopicMessage))
+    {
+        Wrap->SetMsg(tfmsg);
+        TfStaticPublisher->Publish(); // <- no template args, no TUEMessage issues
+    }
+}
+
+
+void AROS2Controller::SrvPause_SetBool(UROS2GenericSrv* InService)
+{
+    UROS2SetBoolSrv* S = Cast<UROS2SetBoolSrv>(InService);
+    if (!S) return;
+
+    FROSSetBoolReq req;  S->GetRequest(req);
+    bool ok = false;
+
+    if (SimManager.IsValid())
+    {
+        if (req.bData) SimManager->PausePhysics();
+        else           SimManager->ResumePhysics();
+        ok = true;
+    }
+    else
+    {
+        // Fallback: world dilation
+        if (UWorld* W = GetWorld()) { W->GetWorldSettings()->SetTimeDilation(req.bData ? 0.0001f : 1.0f); ok = true; }
+    }
+
+    FROSSetBoolRes res;
+    res.bSuccess = ok;
+    res.Message  = req.bData ? TEXT("Paused (sim)") : TEXT("Resumed (sim)");
+    S->SetResponse(res);
+}
+
+void AROS2Controller::SrvReset_Trigger(UROS2GenericSrv* InService)
+{
+    UROS2TriggerSrv* S = Cast<UROS2TriggerSrv>(InService);
+    if (!S) return;
+
+    bool ok = false;
+    if (AQuadPawn* QP = GetQuadPawn())
+    {
+        QP->ResetRotation();
+        QP->ResetPosition();
+        if (QP->QuadController) QP->QuadController->ResetPID();
+        ok = true;
+    }
+
+    FROSTriggerRes res;
+    res.bSuccess = ok;
+    res.Message  = ok ? TEXT("Reset done") : TEXT("Reset failed (no pawn)");
+    S->SetResponse(res);
+}
+
+void AROS2Controller::SrvStep_Trigger(UROS2GenericSrv* InService)
+{
+    UROS2TriggerSrv* S = Cast<UROS2TriggerSrv>(InService);
+    if (!S) return;
+
+    bool ok = false;
+    if (SimManager.IsValid())
+    {
+        SimManager->RequestSimulationStep();
+        ok = true;
+    }
+    else if (UWorld* W = GetWorld())
+    {
+        W->Tick(LEVELTICK_All, (TimeController ? TimeController->GetFixedDeltaTime() : 1.f/200.f));
+        ok = true;
+    }
+
+    FROSTriggerRes res; res.bSuccess = ok; res.Message = ok ? TEXT("Step requested") : TEXT("No sim manager/world");
+    S->SetResponse(res);
 }

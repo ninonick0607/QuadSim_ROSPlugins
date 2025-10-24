@@ -13,7 +13,7 @@ public class UnrealRosFlight : ModuleRules
 
 		// Private dependencies are for things used only in your PRIVATE .cpp files
 		PrivateDependencyModuleNames.AddRange(
-			new string[] { "CoreUObject", "Engine", "Projects", "PhysicsCore", "Chaos", "Sockets", "Networking", "RenderCore", "RHI" });
+			new string[] { "CoreUObject", "Engine", "Projects", "PhysicsCore", "Chaos", "Sockets", "Networking", "RenderCore", "RHI", "SimulationCore" });
 
 		// Add QuadSimCore as a dependency for the communication interfaces
 		string ProjectPluginsDirectory = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../../")); 

@@ -1,195 +1,111 @@
 #pragma once
-
-#include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
+// ---------- rclUE Core ----------
 #include "ROS2NodeComponent.h"
 #include "ROS2Publisher.h"
 #include "ROS2Subscriber.h"
-#include "Components/SceneCaptureComponent2D.h"
-#include "Engine/TextureRenderTarget2D.h"
-
-// --- ROS 2 Message Includes ---
-#include "Msgs/ROS2Point.h"
-#include "Msgs/ROS2Img.h"
-#include "Msgs/ROS2Float64.h"
-#include "Msgs/ROS2Twist.h"
-#include "Msgs/ROS2Imu.h"
-#include "Msgs/ROS2Str.h"
-#include "Msgs/ROS2Vec3.h" 
-#include "Msgs/ROS2Odom.h"
-#include "Msgs/ROS2Empty.h"
-#include "Msgs/ROS2TFMsg.h"           
-#include "Msgs/ROS2TFStamped.h"       
-#include "Msgs/ROS2PoseStamped.h"     
-#include "Msgs/ROS2PointStamped.h"    
-#include "Msgs/ROS2Quat.h"            
-// GPS fix message
-#include "Msgs/ROS2NavSatFix.h"
-
-// --- Utilities ---
+#include "ROS2Service.h"              // NEW
 #include "rclcUtilities.h"
 
-// --- Forward Declarations ---
-class APawn;
-class UActorComponent;
+// ---------- Msgs ----------
+#include "Msgs/ROS2Odom.h"
+#include "Msgs/ROS2Imu.h"             // NEW
+#include "Msgs/ROS2TFMsg.h"
+#include "Msgs/ROS2PoseStamped.h"
+#include "Msgs/ROS2TwistStamped.h"    // NEW
+#include "Msgs/ROS2GenericMsg.h"
+#include "Msgs/ROS2Header.h"
+#include "Msgs/ROS2Time.h"
 
+// ---------- Srvs ----------
+#include "Srvs/ROS2SetBool.h"         // NEW (/pause)
+#include "Srvs/ROS2Trigger.h"         // NEW (/reset, /step)
 #include "ROS2Controller.generated.h"
+class ASimulationManager;
+class UTimeController;
 
 UCLASS(Blueprintable, BlueprintType)
 class UNREALROSFLIGHT_API AROS2Controller : public AActor
 {
     GENERATED_BODY()
-
 public:
     AROS2Controller();
-
-    // Accessors for UI
-    UFUNCTION(BlueprintPure, Category = "ROS2")
-    FVector GetCurrentGoalPosition() const;
-
-    UFUNCTION(BlueprintPure, Category = "ROS2")
-    FString GetDroneID() const;
-
-    // --- ROS2 Node Configuration ---
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2")
-    FString NodeName = TEXT("quad_controller_node");
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2")
-    FString Namespace = TEXT("");
-
-    // --- Publisher Topics & Config ---
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Odometry")
-    FString OdometryTopicName = TEXT("/odom");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Odometry")
-    float OdometryFrequencyHz = 20.f; // Safer default vs 30 FPS engine step
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Position")
-    FString PositionTopicName = TEXT("/drone/position"); // Maybe remove if unused?
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Position")
-    float PositionFrequencyHz = 30.f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Goal")
-    FString PositionGoalTopicName = TEXT("/goal/position"); // Publishes internal goal
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Goal")
-    float GoalFrequenzyHz = 1.f;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Collision")
-    FString CollisionTopicName = TEXT("/drone/collision");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Collision")
-    float CollisionFrequencyHz = 10.f;
-
-    UPROPERTY(EditAnywhere, Category="ROS2|Publishers|TF")
-    FString TFTopicName = TEXT("/tf");
-    UPROPERTY(EditAnywhere, Category="ROS2|Publishers|TF")
-    float TFFrequencyHz = 20.f; // Safer default vs 30 FPS engine step
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
-    FString ImageTopicName = TEXT("/camera/image");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
-    float ImageFrequencyHz = 10.f; // Reduce cost; image encode can exceed 66ms
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|Image")
-    FIntPoint ImageResolution = FIntPoint(256, 256); // Increased default resolution
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|GPS")
-    FString GpsFixTopicName = TEXT("/gps/fix");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Publishers|GPS")
-    float GpsFixFrequencyHz = 10.f;
-
-    // --- Subscriber Topics ---
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
-    FString ObstacleTopicName = TEXT("/obstacles");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
-    FString CmdVelTopicName = TEXT("/cmd_vel");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
-    FString ResetTopicName = TEXT("/reset");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
-    FString HoverTopicName = TEXT("/hover/height");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
-    FString AttitudeEulerTopicName = TEXT("/attitude/euler");
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ROS2|Subscribers")
-    FString ImuTopicName = TEXT("/imu/data");
-    
-    UPROPERTY(EditAnywhere, Category="ROS2|Subscribers")
-    FString GoalPoseTopicName = TEXT("/goal_pose"); // Subscribes to PoseStamped
-
-    // --- Image Capture Component ---
-    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Image Capture")
-    USceneCaptureComponent2D* SceneCapture;
 
 protected:
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
+    // Loop pubs
+    UFUNCTION() void UpdateOdometryMessage(class UROS2GenericMsg* InMessage);
+    UFUNCTION() void UpdateImuMessage(class UROS2GenericMsg* InMessage);       // NEW
+    UFUNCTION() void UpdateTFMessage(class UROS2GenericMsg* InMessage);
+    UFUNCTION() void UpdateClockMessage(class UROS2GenericMsg* InMessage);     // NEW
+    UFUNCTION() void UpdateDesiredVel(class UROS2GenericMsg* InMessage);       // NEW
+
+    // Sub handlers
+    UFUNCTION() void HandleCmdRateStamped(const class UROS2GenericMsg* InMessage); // NEW TwistStamped
+    UFUNCTION() void HandleResetCommand(const class UROS2GenericMsg* InMessage);
+    UFUNCTION() void HandleHoverCommand(const class UROS2GenericMsg* InMessage);
+    UFUNCTION() void HandleAttitudeEuler(const class UROS2GenericMsg* InMessage);
+    UFUNCTION() void HandleVelocityCommand(const class UROS2GenericMsg* InMessage);
+
+    // Service handlers
+    UFUNCTION() void SrvPause_SetBool(class UROS2GenericSrv* InService);
+    UFUNCTION() void SrvReset_Trigger(class UROS2GenericSrv* InService);
+    UFUNCTION() void SrvStep_Trigger (class UROS2GenericSrv* InService);
+
+
+    UFUNCTION() FString GetDroneID() const;
+    
 private:
-    // --- Helper Functions ---
-    void InitializeImageCapture();
-    void CaptureImage();
-    void ProcessCapturedImage(const TArray<FColor>& Pixels);
-    void SetupObstacleManager();
+    UPROPERTY() TWeakObjectPtr<class ASimulationManager> SimManager;
+    UPROPERTY() TWeakObjectPtr<class AQuadPawn> CachedQuadPawn;
+    bool bNodeStarted = false;
 
-    // --- ROS Update Callbacks (for Loop Publishers) ---
-    UFUNCTION()
-    void UpdateOdometryMessage(UROS2GenericMsg* InMessage);
-    UFUNCTION()
-    void UpdateGoalPositionMessage(UROS2GenericMsg* InMessage);
-    UFUNCTION()
-    void UpdateImageMessage(UROS2GenericMsg* InMessage); // Note: Image publishing might be handled differently now
-    UFUNCTION()
-    void UpdateCollisionMessage(UROS2GenericMsg* InMessage);
-    UFUNCTION()
-    void UpdateTFMessage(UROS2GenericMsg* InMsg);
-    UFUNCTION()
-    void UpdateGpsFixMessage(UROS2GenericMsg* InMsg);
+    // Helper to get QuadPawn (works with ChildActorComponent)
+    class AQuadPawn* GetQuadPawn();
 
-    // --- ROS Subscription Handlers ---
-    UFUNCTION()
-    void HandleObstacleMessage(const UROS2GenericMsg* InMsg);
-    UFUNCTION()
-    void HandleVelocityCommand(const UROS2GenericMsg* InMsg);
-    UFUNCTION()
-    void HandleResetCommand(const UROS2GenericMsg* InMsg);
-    UFUNCTION()
-    void HandleHoverCommand(const UROS2GenericMsg* InMsg);
-    UFUNCTION()
-    void HandleGoalPose(const UROS2GenericMsg* InMsg); // Handles incoming PoseStamped goal
-    UFUNCTION()
-    void HandleAttitudeEuler(const UROS2GenericMsg* InMsg);
-    UFUNCTION()
-    void HandleImuData(const UROS2GenericMsg* InMsg);
-    // --- ROS2 Components (Internal) ---
-    UPROPERTY()
-    UROS2NodeComponent* Node;
-    UPROPERTY()
-    UROS2Publisher* OdometryPublisher;
-    UPROPERTY()
-    UROS2Publisher* CollisionPublisher;
-    UPROPERTY()
-    UROS2Publisher* ImagePublisher;
-    UPROPERTY()
-    UROS2Publisher* GoalPosition; // Publishes internal goal
-    UPROPERTY()
-    UROS2Publisher* TfPublisher;
-    UPROPERTY()
-    UROS2Publisher* GpsFixPublisher;
+    // Rates
+    UPROPERTY(EditAnywhere, Category="ROS2|Rates", meta=(ClampMin="1.0"))
+    float OdometryFrequencyHz = 100.f;
+    UPROPERTY(EditAnywhere, Category="ROS2|Rates", meta=(ClampMin="1.0"))
+    float ImuFrequencyHz = 200.f;          // NEW
+    UPROPERTY(EditAnywhere, Category="ROS2|Rates", meta=(ClampMin="1.0"))
+    float TFFrequencyHz = 50.f;
+    UPROPERTY(EditAnywhere, Category="ROS2|Rates", meta=(ClampMin="1.0"))
+    float ClockFrequencyHz = 100.f;        // NEW
 
-    UPROPERTY()
-    UROS2Subscriber* ObstacleSubscriber;
-    UPROPERTY()
-    UROS2Subscriber* CmdVelSubscriber;
-    UPROPERTY()
-    UROS2Subscriber* ResetSubscriber;
-    UPROPERTY()
-    UROS2Subscriber* HoverSubscriber;
-    UPROPERTY()
-    UROS2Subscriber* ImuSubscriber;
-    // --- Internal State ---
-    UPROPERTY()
-    AActor* ObstacleManagerInstance;
-    UPROPERTY()
-    TArray<UTextureRenderTarget2D*> RenderTargets;
-    FTimerHandle CaptureTimerHandle;
-    int32 CurrentRenderTargetIndex = 0;
-    bool bIsProcessingImage = false;
-    int32 LastReceivedObstacleCount = 0;
+    // Flat topics (no per-drone suffix)
+    UPROPERTY(VisibleAnywhere, Category="ROS2|Topics")
+    FString T_Odom   = TEXT("/quadsim/odom");
+    UPROPERTY(VisibleAnywhere, Category="ROS2|Topics")
+    FString T_Imu    = TEXT("/quadsim/imu");
+    UPROPERTY(VisibleAnywhere, Category="ROS2|Topics")
+    FString T_CmdRate= TEXT("/resnet/cmd_vel_residual");
+    UPROPERTY(VisibleAnywhere, Category="ROS2|Topics")
+    FString T_RefVel= TEXT("/ref/vel_local");
+    
+    // Node & Pubs
+    UPROPERTY() UROS2NodeComponent* Node            = nullptr;
+    UPROPERTY() UROS2Publisher*     OdomPublisher   = nullptr;
+    UPROPERTY() UROS2Publisher*     ImuPublisher    = nullptr; // NEW
+    UPROPERTY() UROS2Publisher*     VelRef    = nullptr;
+    UPROPERTY() UROS2Publisher*     TfPublisher     = nullptr;
+    UPROPERTY() UROS2Publisher*     TfStaticPublisher = nullptr; // NEW (one-shot)
+    UPROPERTY() UROS2Publisher*     ClockPublisher  = nullptr; // NEW
 
+    // Sub
+    UPROPERTY() UROS2Subscriber*    CmdRateSubscriber = nullptr;
+
+    // Srvs
+    UPROPERTY() UROS2Service*       PauseService   = nullptr;
+    UPROPERTY() UROS2Service*       ResetService   = nullptr;
+    UPROPERTY() UROS2Service*       StepService    = nullptr;
+
+    // Helpers
+    FROSTime GetSimTimeStamp() const;
+    void PublishTFStaticOnce();  // NEW
+
+    // Optional: hook to your time controller if/when you wire it
+    UPROPERTY(EditAnywhere, Category="ROS2|Time")
+    TObjectPtr<class UTimeController> TimeController = nullptr;
 };
